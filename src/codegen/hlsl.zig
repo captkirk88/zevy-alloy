@@ -94,9 +94,40 @@ const HlslEmitter = struct {
     }
 
     fn emitModule(self: *HlslEmitter, module: *const ir.Module) iface.GenerateError!void {
+        // Emit declarations in dependency order:
+        // 1. Structs and resources.
+        // 2. Constants and non-entry-point helpers.
+        // 3. Entry-point functions last.
         for (module.declarations.items) |*decl| {
-            try self.emitDecl(decl);
-            try self.newline();
+            switch (decl.*) {
+                .struct_type, .resource => {
+                    try self.emitDecl(decl);
+                    try self.newline();
+                },
+                else => {},
+            }
+        }
+        for (module.declarations.items) |*decl| {
+            switch (decl.*) {
+                .constant => {
+                    try self.emitDecl(decl);
+                    try self.newline();
+                },
+                .function => |*f| if (!f.is_entry_point) {
+                    try self.emitDecl(decl);
+                    try self.newline();
+                },
+                else => {},
+            }
+        }
+        for (module.declarations.items) |*decl| {
+            switch (decl.*) {
+                .function => |*f| if (f.is_entry_point) {
+                    try self.emitDecl(decl);
+                    try self.newline();
+                },
+                else => {},
+            }
         }
     }
 
@@ -204,16 +235,35 @@ const HlslEmitter = struct {
         }
     }
 
+    fn bodyHasInvocationId(body: []const ir.Statement) bool {
+        for (body) |stmt| {
+            if (stmt == .var_decl) {
+                if (stmt.var_decl.type) |t| {
+                    if (t == .named and std.mem.eql(u8, t.named, "InvocationId")) return true;
+                }
+            }
+        }
+        return false;
+    }
+
     fn emitFunction(self: *HlslEmitter, f: *const ir.FunctionDecl) iface.GenerateError!void {
+        if (f.is_entry_point and f.stage == .compute) {
+            const size = self.module.resolvedComputeLocalSize();
+            try self.wfmt("[numthreads({d}, {d}, {d})]\n", .{ size.x, size.y, size.z });
+        }
         try self.emitType(f.return_type);
         try self.wfmt(" {s}(", .{f.name});
-        for (f.params, 0..) |p, i| {
-            if (i > 0) try self.w(", ");
+        var param_count: usize = 0;
+        for (f.params) |p| {
+            if (param_count > 0) try self.w(", ");
             try self.emitType(p.type);
             try self.wfmt(" {s}", .{p.name});
-            if (p.semantic.kind != .none) {
-                try self.emitSemantic(p.semantic);
-            }
+            if (p.semantic.kind != .none) try self.emitSemantic(p.semantic);
+            param_count += 1;
+        }
+        if (f.is_entry_point and f.stage == .compute and bodyHasInvocationId(f.body)) {
+            if (param_count > 0) try self.w(", ");
+            try self.w("uint3 _invoc_id : SV_DispatchThreadID");
         }
         try self.w(") {\n");
         self.indent += 1;
@@ -248,6 +298,14 @@ const HlslEmitter = struct {
                 try self.wfmt("{s}}}\n", .{ind});
             },
             .var_decl => |v| {
+                const is_invoc_id = if (v.type) |t| switch (t) {
+                    .named => |n| std.mem.eql(u8, n, "InvocationId"),
+                    else => false,
+                } else false;
+                if (is_invoc_id) {
+                    try self.wfmt("{s}uint3 {s} = _invoc_id;\n", .{ ind, v.name });
+                    return;
+                }
                 if (v.type) |t| {
                     try self.wfmt("{s}{s} {s}", .{ ind, typeName(t), v.name });
                 } else {

@@ -74,4 +74,5 @@ test {
     std.testing.refAllDecls(stdlib);
     std.testing.refAllDecls(ImportResolver);
     std.testing.refAllDecls(ir);
+    std.testing.refAllDecls(@import("codegen/semantic_tests.zig"));
 }

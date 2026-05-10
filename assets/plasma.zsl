@@ -2,7 +2,7 @@
 // This is a valid Zig source file (parseable by std.zig.Ast).
 // The ZSL compiler reads this and emits HLSL / GLSL / MSL / SPIR-V (requires glslangValidator tool) / DXIL (requires dxc tool).
 
-const zsl = @import("zsl");
+const zsl = @import("../zsl.zig");
 
 // ── Resources ─────────────────────────────────────────────────────────────────
 
@@ -12,6 +12,7 @@ const Context = struct {
     cursor: zsl.Vec2,
     time: zsl.f32,
 };
+
 const context = zsl.UniformBuffer(Context, .{ .binding = 0, .space = 3 });
 
 /// Texture and sampler at binding=0, space=2.

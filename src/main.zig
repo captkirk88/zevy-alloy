@@ -1,6 +1,26 @@
 const std = @import("std");
 const zsl = @import("zevy_alloy");
 
+fn parsePositiveU32(arg_name: []const u8, value: []const u8) !u32 {
+    const parsed = std.fmt.parseInt(u32, value, 10) catch return error.InvalidArgument;
+    if (parsed == 0) return error.InvalidArgument;
+    _ = arg_name;
+    return parsed;
+}
+
+fn parseLocalSizeTriplet(value: []const u8) !zsl.ir.ComputeLocalSize {
+    var parts = std.mem.splitScalar(u8, value, ',');
+    const x_txt = parts.next() orelse return error.InvalidArgument;
+    const y_txt = parts.next() orelse return error.InvalidArgument;
+    const z_txt = parts.next() orelse return error.InvalidArgument;
+    if (parts.next() != null) return error.InvalidArgument;
+    return .{
+        .x = try parsePositiveU32("x", std.mem.trim(u8, x_txt, " \t")),
+        .y = try parsePositiveU32("y", std.mem.trim(u8, y_txt, " \t")),
+        .z = try parsePositiveU32("z", std.mem.trim(u8, z_txt, " \t")),
+    };
+}
+
 const usage =
     \\Usage: zevy-alloy compile <file.zsl> [options]
     \\
@@ -12,6 +32,10 @@ const usage =
     \\  --out-msl    <path>   Write MSL output to path
     \\  --out-spv    <path>   Write SPIR-V output to path (requires glslangValidator or glslc)
     \\  --out-dxil   <path>   Write DXIL output to path (requires dxc)
+    \\  --local-size <x,y,z>  Override compute local size for GLSL/SPIR-V/DXIL paths
+    \\  --local-size-x <n>    Override compute local size X (>= 1)
+    \\  --local-size-y <n>    Override compute local size Y (>= 1)
+    \\  --local-size-z <n>    Override compute local size Z (>= 1)
     \\  --help               Show this help
     \\
 ;
@@ -45,6 +69,7 @@ pub fn main(init: std.process.Init) !void {
     // Parse output paths from remaining args.
     const OutSpec = struct { kind: []const u8, path: []const u8 };
     var out_specs: std.ArrayList(OutSpec) = .empty;
+    var local_size_override: ?zsl.ir.ComputeLocalSize = null;
 
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
@@ -54,6 +79,41 @@ pub fn main(init: std.process.Init) !void {
             try out_w.flush();
             return;
         }
+
+        if (std.mem.eql(u8, flag, "--local-size")) {
+            i += 1;
+            if (i >= args.len) {
+                err_w.interface.print("Missing value for {s}\n", .{flag}) catch {};
+                try err_w.flush();
+                std.process.exit(1);
+            }
+            local_size_override = parseLocalSizeTriplet(args[i]) catch {
+                err_w.interface.print("Invalid value for --local-size: '{s}' (expected x,y,z with each >= 1)\n", .{args[i]}) catch {};
+                try err_w.flush();
+                std.process.exit(1);
+            };
+            continue;
+        }
+
+        if (std.mem.eql(u8, flag, "--local-size-x") or std.mem.eql(u8, flag, "--local-size-y") or std.mem.eql(u8, flag, "--local-size-z")) {
+            i += 1;
+            if (i >= args.len) {
+                err_w.interface.print("Missing value for {s}\n", .{flag}) catch {};
+                try err_w.flush();
+                std.process.exit(1);
+            }
+            const v = parsePositiveU32(flag, args[i]) catch {
+                err_w.interface.print("Invalid value for {s}: '{s}' (expected integer >= 1)\n", .{ flag, args[i] }) catch {};
+                try err_w.flush();
+                std.process.exit(1);
+            };
+            if (local_size_override == null) local_size_override = .{};
+            if (std.mem.eql(u8, flag, "--local-size-x")) local_size_override.?.x = v;
+            if (std.mem.eql(u8, flag, "--local-size-y")) local_size_override.?.y = v;
+            if (std.mem.eql(u8, flag, "--local-size-z")) local_size_override.?.z = v;
+            continue;
+        }
+
         var matched = false;
         inline for (std.meta.fields(zsl.ShaderFormat)) |f| {
             const fmt: zsl.ShaderFormat = @enumFromInt(f.value);
@@ -137,7 +197,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Compile.
-    var result = try zsl.compile(init.io, alloc, source, abs_path, requested_gens.items, .{});
+    var result = try zsl.compile(init.io, alloc, source, abs_path, requested_gens.items, .{
+        .compute_local_size_override = local_size_override,
+    });
     defer result.deinit();
 
     // Print diagnostics.

@@ -64,9 +64,40 @@ const MslEmitter = struct {
         try self.w("#include <simd/simd.h>\n\n");
         try self.w("using namespace metal;\n\n");
 
+        // Emit declarations in dependency order:
+        // 1. Structs and resources.
+        // 2. Constants and non-entry-point helpers.
+        // 3. Entry-point functions last.
         for (module.declarations.items) |*decl| {
-            try self.emitDecl(decl);
-            try self.w("\n");
+            switch (decl.*) {
+                .struct_type, .resource => {
+                    try self.emitDecl(decl);
+                    try self.w("\n");
+                },
+                else => {},
+            }
+        }
+        for (module.declarations.items) |*decl| {
+            switch (decl.*) {
+                .constant => {
+                    try self.emitDecl(decl);
+                    try self.w("\n");
+                },
+                .function => |*f| if (!f.is_entry_point) {
+                    try self.emitDecl(decl);
+                    try self.w("\n");
+                },
+                else => {},
+            }
+        }
+        for (module.declarations.items) |*decl| {
+            switch (decl.*) {
+                .function => |*f| if (f.is_entry_point) {
+                    try self.emitDecl(decl);
+                    try self.w("\n");
+                },
+                else => {},
+            }
         }
     }
 
@@ -166,6 +197,20 @@ const MslEmitter = struct {
             param_idx += 1;
         }
         // Inject resource parameters for entry points.
+        if (f.is_entry_point and f.stage == .compute) {
+            for (f.body) |stmt| {
+                if (stmt == .var_decl) {
+                    if (stmt.var_decl.type) |t| {
+                        if (t == .named and std.mem.eql(u8, t.named, "InvocationId")) {
+                            if (param_idx > 0) try self.w(",\n    ");
+                            try self.w("uint3 _invoc_id [[thread_position_in_grid]]");
+                            param_idx += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         if (f.is_entry_point) {
             for (self.module.declarations.items) |*decl| {
                 switch (decl.*) {
@@ -178,12 +223,8 @@ const MslEmitter = struct {
                                 });
                             },
                             .uniform_buffer => {
-                                const type_name: []const u8 = switch (r.type) {
-                                    .named => |n| n,
-                                    else => "uint8_t",
-                                };
                                 try self.wfmt("constant {s}& {s} [[buffer({d})]]", .{
-                                    type_name, r.name, r.binding.binding,
+                                    mslTypeName(r.type), r.name, r.binding.binding,
                                 });
                             },
                             .texture => {
@@ -202,21 +243,13 @@ const MslEmitter = struct {
                                 });
                             },
                             .storage_buffer_read => {
-                                const type_name: []const u8 = switch (r.type) {
-                                    .named => |n| n,
-                                    else => "float",
-                                };
                                 try self.wfmt("const device {s}* {s} [[buffer({d})]]", .{
-                                    type_name, r.name, r.binding.binding,
+                                    mslTypeName(r.type), r.name, r.binding.binding,
                                 });
                             },
                             .storage_buffer_read_write => {
-                                const type_name: []const u8 = switch (r.type) {
-                                    .named => |n| n,
-                                    else => "float",
-                                };
                                 try self.wfmt("device {s}* {s} [[buffer({d})]]", .{
-                                    type_name, r.name, r.binding.binding,
+                                    mslTypeName(r.type), r.name, r.binding.binding,
                                 });
                             },
                         }
@@ -253,6 +286,14 @@ const MslEmitter = struct {
                 try self.wfmt("{s}}}\n", .{ind});
             },
             .var_decl => |v| {
+                const is_invoc_id = if (v.type) |t| switch (t) {
+                    .named => |n| std.mem.eql(u8, n, "InvocationId"),
+                    else => false,
+                } else false;
+                if (is_invoc_id) {
+                    try self.wfmt("{s}uint3 {s} = _invoc_id;\n", .{ ind, v.name });
+                    return;
+                }
                 if (v.type) |t| {
                     try self.wfmt("{s}{s} {s}", .{ ind, mslTypeName(t), v.name });
                 } else {

@@ -34,8 +34,8 @@ pub const SpirvGenerator = struct {
     ) iface.GenerateError!void {
         _ = ptr;
 
-        // 1. Generate GLSL 450 source.
-        var glsl_impl = glsl_gen.GlslGenerator{ .version = .glsl450 };
+        // 1. Generate GLSL 450 source with SPIRV-compatible uniform layout qualifiers.
+        var glsl_impl = glsl_gen.GlslGenerator{ .version = .glsl450, .spirv_compat = true };
         const glsl_gen_iface = glsl_impl.generator();
         const glsl_src = try glsl_gen_iface.generateToSlice(module, io, alloc);
         defer alloc.free(glsl_src);
@@ -79,10 +79,13 @@ pub const SpirvGenerator = struct {
         defer alloc.free(spv_full);
 
         // 4. Invoke glslangValidator or glslc.
+        // Use OpenGL SPIR-V target (-G / --target-env=opengl) so that standalone
+        // `uniform float x;` declarations (valid OpenGL GLSL, invalid Vulkan GLSL)
+        // are accepted.
         const result = blk: {
-            const r = ext.run(io, &.{ "glslangValidator", "-V", "-o", spv_full, glsl_full }) catch |e| {
+            const r = ext.run(io, &.{ "glslangValidator", "-G", "-o", spv_full, glsl_full }) catch |e| {
                 if (e == error.NotFound) {
-                    break :blk ext.run(io, &.{ "glslc", "-o", spv_full, glsl_full }) catch |e2| {
+                    break :blk ext.run(io, &.{ "glslc", "--target-env=opengl", "-o", spv_full, glsl_full }) catch |e2| {
                         if (e2 == error.NotFound) return error.ExternalCompilerNotFound;
                         return error.ExternalCompilerFailed;
                     };

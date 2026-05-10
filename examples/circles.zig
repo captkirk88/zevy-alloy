@@ -296,9 +296,6 @@ pub fn main(init: std.process.Init) !u8 {
     std.log.info("Adding InputPlugin...", .{});
     try plugin_manager.add(InputPlugin(ParamRegistry), .{});
 
-    std.log.info("Adding RayGuiPlugin...", .{});
-    try plugin_manager.add(UIPlugin(ParamRegistry), .{});
-
     // Build all plugins (this calls their build() methods)
     std.log.info("Building plugins...", .{});
     try plugin_manager.build(&ecs);
@@ -315,7 +312,6 @@ pub fn main(init: std.process.Init) !u8 {
     defer assets_ptr.deinit();
     const assets_lock = assets_ptr.lockWrite();
     defer assets_lock.deinit();
-    zevy_raylib.ui.systems.registerIconAtlasFromAssets(&ecs, assets_lock.get(), "embedded://Keyboard & Mouse/keyboard-&-mouse_sheet_default.xml", .{});
 
     // Get the scheduler that was created by the plugins
     const scheduler = blk: {

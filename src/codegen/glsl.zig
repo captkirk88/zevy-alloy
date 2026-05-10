@@ -36,6 +36,9 @@ pub const GlslVersion = enum {
 
 pub const GlslGenerator = struct {
     version: GlslVersion,
+    /// When true, bare `uniform T name;` declarations get an explicit
+    /// `layout(location=N)` qualifier required by SPIRV (glslc/glslangValidator).
+    spirv_compat: bool = false,
 
     const vtable = iface.VTable{
         .name = name_fn,
@@ -70,7 +73,7 @@ pub const GlslGenerator = struct {
         _ = io;
         _ = alloc;
         const self: *GlslGenerator = @ptrCast(@alignCast(ptr));
-        var emitter = GlslEmitter{ .writer = writer, .version = self.version, .module = module };
+        var emitter = GlslEmitter{ .writer = writer, .version = self.version, .module = module, .spirv_compat = self.spirv_compat };
         try emitter.emitModule(module);
     }
 };
@@ -82,9 +85,14 @@ const GlslEmitter = struct {
     version: GlslVersion,
     indent: u32 = 0,
     module: *const ir.Module,
+    entry_stage: ir.ShaderStage = .unknown,
     /// Non-null when emitting inside an entry point whose return type is a struct.
     /// Holds the name of the output struct type (e.g. "PSOutput").
     entry_output_struct: ?[]const u8 = null,
+    /// When true, bare `uniform T name;` declarations get auto-assigned
+    /// `layout(location=N)` qualifiers (required for SPIRV compilation).
+    spirv_compat: bool = false,
+    next_uniform_location: u32 = 0,
 
     fn findStruct(self: *GlslEmitter, name: []const u8) ?*const ir.StructDecl {
         for (self.module.declarations.items) |*decl| {
@@ -139,10 +147,45 @@ const GlslEmitter = struct {
         const entry = module.anyEntryPoint();
         const stage = if (entry) |e| e.stage else ir.ShaderStage.unknown;
 
-        // Emit structs, resources, helper functions, then entry points.
+        if (stage == .compute) {
+            const size = module.resolvedComputeLocalSize();
+            try self.wfmt("layout(local_size_x = {d}, local_size_y = {d}, local_size_z = {d}) in;\n\n", .{ size.x, size.y, size.z });
+        }
+
+        // Emit declarations in dependency order:
+        // 1. Structs and resources (needed before functions reference their types).
+        // 2. Constants and non-entry-point functions (helpers from imports too).
+        // 3. Entry-point functions last (they call helpers defined above).
         for (module.declarations.items) |*decl| {
-            try self.emitDecl(decl, stage);
-            try self.w("\n");
+            switch (decl.*) {
+                .struct_type, .resource => {
+                    try self.emitDecl(decl, stage);
+                    try self.w("\n");
+                },
+                else => {},
+            }
+        }
+        for (module.declarations.items) |*decl| {
+            switch (decl.*) {
+                .constant => {
+                    try self.emitDecl(decl, stage);
+                    try self.w("\n");
+                },
+                .function => |*f| if (!f.is_entry_point) {
+                    try self.emitDecl(decl, stage);
+                    try self.w("\n");
+                },
+                else => {},
+            }
+        }
+        for (module.declarations.items) |*decl| {
+            switch (decl.*) {
+                .function => |*f| if (f.is_entry_point) {
+                    try self.emitDecl(decl, stage);
+                    try self.w("\n");
+                },
+                else => {},
+            }
         }
     }
 
@@ -171,7 +214,12 @@ const GlslEmitter = struct {
     fn emitResource(self: *GlslEmitter, r: *const ir.ResourceDecl) iface.GenerateError!void {
         switch (r.kind) {
             .uniform => {
-                try self.wfmt("uniform {s} {s};\n", .{ glslTypeName(r.type), r.name });
+                if (self.spirv_compat) {
+                    try self.wfmt("layout(location = {d}) uniform {s} {s};\n", .{ self.next_uniform_location, glslTypeName(r.type), r.name });
+                    self.next_uniform_location += 1;
+                } else {
+                    try self.wfmt("uniform {s} {s};\n", .{ glslTypeName(r.type), r.name });
+                }
             },
             .uniform_buffer => {
                 // layout(binding = N) on uniform blocks requires GLSL 4.20+.
@@ -236,6 +284,7 @@ const GlslEmitter = struct {
 
     fn emitFunction(self: *GlslEmitter, f: *const ir.FunctionDecl, stage: ir.ShaderStage) iface.GenerateError!void {
         if (f.is_entry_point) {
+            self.entry_stage = stage;
             // Entry point → emit I/O variables + void main().
             try self.emitEntryPointIo(f, stage);
             // Track struct return type so return_stmt can copy fields to out-vars.
@@ -280,6 +329,7 @@ const GlslEmitter = struct {
         }
         self.indent -= 1;
         self.entry_output_struct = null;
+        self.entry_stage = .unknown;
         try self.w("}\n");
     }
 
@@ -392,6 +442,14 @@ const GlslEmitter = struct {
                 try self.wfmt("{s}}}\n", .{ind});
             },
             .var_decl => |v| {
+                const is_invoc_id = if (v.type) |t| switch (t) {
+                    .named => |n| std.mem.eql(u8, n, "InvocationId"),
+                    else => false,
+                } else false;
+                if (self.entry_stage == .compute and is_invoc_id) {
+                    try self.wfmt("{s}const uvec3 {s} = gl_GlobalInvocationID;\n", .{ ind, glslIdentName(v.name) });
+                    return;
+                }
                 if (v.type) |t| {
                     try self.wfmt("{s}{s} {s}", .{ ind, glslTypeName(t), glslIdentName(v.name) });
                 } else {
@@ -702,4 +760,29 @@ test "glsl330 version directive" {
     const out = try gen.generateToSlice(&module, io, alloc);
     defer alloc.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "#version 330 core") != null);
+}
+
+test "glsl compute local size preamble" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var module = ir.Module.init(alloc, "test.zsl");
+    defer module.deinit();
+
+    module.compute_local_size = .{ .x = 8, .y = 4, .z = 2 };
+    try module.declarations.append(module.allocator(), .{
+        .function = .{
+            .name = "main",
+            .params = &.{},
+            .return_type = .{ .void = {} },
+            .body = &.{},
+            .stage = .compute,
+            .is_entry_point = true,
+        },
+    });
+
+    var gen_impl = GlslGenerator{ .version = .glsl450 };
+    const gen = gen_impl.generator();
+    const out = try gen.generateToSlice(&module, io, alloc);
+    defer alloc.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "layout(local_size_x = 8, local_size_y = 4, local_size_z = 2) in;") != null);
 }

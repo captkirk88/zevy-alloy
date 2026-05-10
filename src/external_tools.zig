@@ -19,12 +19,11 @@ pub const RunError = error{
 };
 
 /// Check if a program is available on PATH.
-pub fn detect(alloc: std.mem.Allocator, name: []const u8) bool {
-    var child = std.process.Child.init(&.{ name, "--version" }, alloc);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return false;
-    _ = child.wait() catch return false;
+pub fn detect(io: std.Io, name: []const u8) bool {
+    var child = std.process.spawn(io, .{ .argv = &.{ name, "--version" } }) catch return false;
+    child.stout = null;
+    child.stderr = null;
+    _ = child.wait(io) catch return false;
     return true;
 }
 

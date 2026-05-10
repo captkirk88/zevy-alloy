@@ -1,0 +1,14 @@
+const zsl = @import("zsl");
+const util = @import("util.zsl");
+
+pub const compute: zsl.ComputeOpts = .{ .local_size_x = 64, .local_size_y = 1, .local_size_z = 1 };
+
+/// results[n] = n! for 0 ≤ n ≤ 12  (12! = 479001600, fits in u32).
+pub var results: zsl.StorageBuffer(u32, .{ .binding = 0 }) = undefined;
+
+pub fn main(_: zsl.Stage.compute) void {
+    const id: zsl.InvocationId = undefined;
+    const n: u32 = id.x;
+    if (n >= util.max_factorial_n + 1) return;
+    results[n] = util.factorial(n);
+}

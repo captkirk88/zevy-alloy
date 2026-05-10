@@ -2,12 +2,19 @@ const std = @import("std");
 const buildtools = @import("zevy_buildtools");
 
 pub const ShaderFormat = enum {
+    /// DirectX HLSL (shader model 6.0+)
     hlsl,
+    /// GLSL 4.50 core profile (desktop OpenGL, Vulkan, etc.)
     glsl450,
+    /// GLSL ES 3.00 (mobile OpenGL ES, WebGL 2)
     glsl330,
+    /// GLSL ES 3.00 (mobile OpenGL ES, WebGL 2), with extra restrictions for better compatibility with shader translators like SPIRV-Cross. Recommended for maximum portability when targeting multiple platforms.
     glsles300,
+    /// Metal Shading Language (Apple platforms)
     msl,
+    /// SPIR-V binary format (Vulkan, OpenGL with GL_ARB_gl_spirv extension, DirectX with SPIRV-Cross, etc.)
     spirv,
+    /// DirectX Shader Intermediate Language (DXIL) for shader model 6.0+. Supported natively on Windows 10+ with Direct3D 12, and on other platforms via shader translators like SPIRV-Cross.
     dxil,
 
     pub fn flag(self: ShaderFormat) []const u8 {
@@ -85,7 +92,7 @@ pub fn build(b: *std.Build) !void {
     // `zsl` module: real Zig stubs for all ZSL built-ins so that zls can
     // analyse `.zsl` shader source files without errors.
     _ = b.addModule("zsl", .{
-        .root_source_file = b.path("src/zsl.zig"),
+        .root_source_file = b.path("zsl.zig"),
         .target = target,
     });
 
@@ -149,6 +156,20 @@ pub fn build(b: *std.Build) !void {
                 .{ .format = .glsl330, .path = "examples/circle_color.330.frag.glsl" },
                 .{ .format = .glsl450, .path = "examples/circle_color.450.frag.glsl" },
                 .{ .format = .glsles300, .path = "examples/circle_color.es.frag.glsl" },
+                .{ .format = .hlsl, .path = "examples/circle_color.hlsl" },
+                .{ .format = .msl, .path = "examples/circle_color.metal" },
+                .{ .format = .spirv, .path = "examples/circle_color.spv" },
+                .{ .format = .dxil, .path = "examples/circle_color.dxil" },
+            },
+        },
+        .{
+            .zsl = "examples/factorial.zsl",
+            .outputs = &.{
+                .{ .format = .glsl450, .path = "examples/factorial.glsl" },
+                .{ .format = .msl, .path = "examples/factorial.metal" },
+                .{ .format = .hlsl, .path = "examples/factorial.hlsl" },
+                .{ .format = .dxil, .path = "examples/factorial.dxil" },
+                .{ .format = .spirv, .path = "examples/factorial.spv" },
             },
         },
     });
@@ -162,19 +183,64 @@ pub fn build(b: *std.Build) !void {
     const plugins_mod = zevy_ecs_dep.module("plugins");
 
     const raylib_dep = b.dependency("raylib_zig", .{ .target = target, .optimize = optimize });
+    const raylib_compute_dep = b.dependency("raylib_zig", .{
+        .target = target,
+        .optimize = optimize,
+        .opengl_version = .gl_4_3,
+    });
 
     b.installArtifact(raylib_dep.artifact("raylib"));
 
     const zevy_raylib_dep = b.dependency("zevy_raylib", .{ .target = target, .optimize = optimize });
     const zevy_raylib_mod = zevy_raylib_dep.module("zevy_raylib");
 
-    const examples = buildtools.examples.setupExamples(b, &.{
-        .{ .name = "zevy_ecs", .module = zevy_ecs_mod },
-        .{ .name = "plugins", .module = plugins_mod },
-        .{ .name = "zevy_raylib", .module = zevy_raylib_mod },
-        .{ .name = "raylib", .module = raylib_dep.module("raylib") },
-    }, target, optimize);
-    examples.step.dependOn(shaders_step);
+    const circles_mod = b.createModule(.{
+        .root_source_file = b.path("examples/circles.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zevy_ecs", .module = zevy_ecs_mod },
+            .{ .name = "plugins", .module = plugins_mod },
+            .{ .name = "zevy_raylib", .module = zevy_raylib_mod },
+            .{ .name = "raylib", .module = raylib_dep.module("raylib") },
+        },
+    });
+
+    const circles_exe = b.addExecutable(.{
+        .name = "circles",
+        .root_module = circles_mod,
+    });
+
+    const circles_run = b.addRunArtifact(circles_exe);
+    circles_run.step.dependOn(shaders_step);
+
+    const circles_step = b.step("circles", "Run the circles example");
+    circles_step.dependOn(&circles_run.step);
+
+    const factorial_mod = b.createModule(.{
+        .root_source_file = b.path("examples/factorial.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "raylib", .module = raylib_compute_dep.module("raylib") },
+        },
+    });
+
+    const compute_factorial_exe = b.addExecutable(.{
+        .name = "factorial",
+        .root_module = factorial_mod,
+    });
+
+    compute_factorial_exe.step.dependOn(shaders_step);
+    const compute_factorial_run = b.addRunArtifact(compute_factorial_exe);
+    compute_factorial_run.step.dependOn(shaders_step);
+
+    const compute_factorial_step = b.step("factorial", "Run the compute factorial example");
+    compute_factorial_step.dependOn(&compute_factorial_run.step);
+
+    const examples_step = b.step("examples", "Run all examples");
+    examples_step.dependOn(circles_step);
+    examples_step.dependOn(compute_factorial_step);
 
     try buildtools.fetch.addFetchStep(b, b.path("build.zig.zon"));
 }

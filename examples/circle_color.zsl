@@ -2,21 +2,21 @@
 // Reads per-entity hue from v_color.x (packed as r/255), computes a
 // time-driven RGB color using sin waves, and outputs it.
 //
-// Must match jok's default fragment shader layout exactly:
-//   - cbuffer Context at register(b0, space3)
-//   - PSInput / PSOutput struct names
-//   - entry point named `main`
+// The input/output struct names are arbitrary; only the field semantics and
+// entry point stage matter. This example keeps the `main` entry point but the
+// input/output type names can be changed freely.
 
 const zsl = @import("../zsl.zig");
-
+const sin = zsl.sin;
+const abs = zsl.abs;
 // ── Shader uniforms ───────────────────────────────────────────────────────────
 
-const time = zsl.Uniform(f32, .{});
-const hue = zsl.Uniform(f32, .{});
+pub var time: f32 = 0.0;
+pub var hue: f32 = 0.0;
 
 // ── I/O structs ───────────────────────────────────────────────────────────────
 
-const PSInput = struct {
+const CircleInput = struct {
     /// zsl.SVPosition
     v_pos: zsl.Vec4,
     /// zsl.Color(0)
@@ -25,26 +25,21 @@ const PSInput = struct {
     v_uv: zsl.Vec2,
 };
 
-const PSOutput = struct {
+const CircleOutput = struct {
     /// zsl.SVTarget
     o_color: zsl.Vec4,
 };
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Fragment shader: each pixel's color is driven by jok's built-in time and
-/// the per-entity hue packed into the entity Color.r byte (v_color.x = r/255).
-pub fn main(stage: zsl.Stage.fragment, input: PSInput) PSOutput {
-    _ = stage;
-    _ = input;
-
+pub fn main(_: zsl.Stage.fragment, _: CircleInput) CircleOutput {
     const tau: f32 = 6.2831853;
     const base: f32 = tau * hue + time;
 
-    const r: f32 = zsl.abs(zsl.sin(base));
-    const g: f32 = zsl.abs(zsl.sin(base + tau / 3.0));
-    const b: f32 = zsl.abs(zsl.sin(base + tau * 2.0 / 3.0));
-    var output: PSOutput = undefined;
+    const r: f32 = abs(sin(base));
+    const g: f32 = abs(sin(base + tau / 3.0));
+    const b: f32 = abs(sin(base + tau * 2.0 / 3.0));
+    var output: CircleOutput = undefined;
     output.o_color = zsl.Vec4{ r, g, b, 1.0 };
     return output;
 }

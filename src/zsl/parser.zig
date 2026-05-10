@@ -8,8 +8,13 @@
 //!  - Entry points are `pub fn` with a `zsl.Stage` annotation:
 //!      `pub const stage: zsl.Stage = .fragment;` at file scope, OR
 //!      a comptime `stage` parameter in the function.
+//!  - Optional compute config:
+//!      `pub const compute: zsl.ComputeOpts = .{ .local_size_x = 8, .local_size_y = 8, .local_size_z = 1 };`
 //!  - Struct fields annotated with `zsl.SVPosition`, `zsl.SVTarget(N)`, etc.
-//!  - Resources declared as `pub const name = zsl.UniformBuffer(T, .{ .binding = 0, .space = 0 });`
+//!  - Plain typed uniforms are declared as `pub var name: T = ...;`
+//!  - Resource wrappers remain explicit in type annotations, e.g.
+//!    `pub var context: zsl.UniformBuffer(T, .{ ... }) = undefined;`
+//!  - The legacy `zsl.Uniform(...)` wrapper is still accepted, but deprecated.
 const std = @import("std");
 const Ast = std.zig.Ast;
 const ir = @import("ir.zig");
@@ -180,7 +185,9 @@ const Parser = struct {
                 try self.imports.put(var_name, .{ .stdlib = {} });
             } else if (std.mem.endsWith(u8, import_path, ".zsl")) {
                 const importer_dir = std.fs.path.dirname(self.file_path) orelse ".";
-                const canonical = try self.resolver.resolve(importer_dir, import_path);
+                // Allocate the canonical path from mod_alloc so it is freed
+                // automatically when the module's arena is deinitialized.
+                const canonical = try self.resolver.resolve(self.mod_alloc, importer_dir, import_path);
                 try self.imports.put(var_name, .{ .user_module = canonical });
                 try self.module.imported_paths.append(self.mod_alloc, canonical);
             }
@@ -280,6 +287,7 @@ const Parser = struct {
     fn parseVarDecl(self: *Parser, node: Ast.Node.Index) !void {
         const tags = self.ast.nodes.items(.tag);
         const main_tokens = self.ast.nodes.items(.main_token);
+        const decl_keyword = self.tokenSlice(main_tokens[@intFromEnum(node)]);
 
         const name_tok = main_tokens[@intFromEnum(node)] + 1;
         const decl_name = self.tokenSlice(name_tok);
@@ -290,10 +298,32 @@ const Parser = struct {
             self.ast.localVarDecl(node);
         const init_node = vd.ast.init_node.unwrap() orelse return; // extern / no init
 
+        // Module-level compute options.
+        if (std.mem.eql(u8, decl_keyword, "const") and std.mem.eql(u8, decl_name, "compute")) {
+            if (vd.ast.type_node.unwrap()) |type_node| {
+                if (self.isComputeOptsTypeNode(type_node)) {
+                    if (try self.parseComputeLocalSizeInit(init_node)) |size| {
+                        self.module.compute_local_size = size;
+                    }
+                    return;
+                }
+            }
+        }
+
         const init_tag = tags[@intFromEnum(init_node)];
 
         // Check for `@import(...)` €” already handled in first pass.
         if (init_tag == .builtin_call_two or init_tag == .builtin_call_two_comma) return;
+
+        // Check for `const X = importAlias.Y` -- a function/type alias from an import.
+        // e.g. `const abs = zsl.abs;` or `const sin = zsl.sin;`.
+        // These have no shader representation; silently skip them.
+        if (init_tag == .field_access) {
+            const base_node = self.ast.nodeData(init_node).node_and_token[0];
+            const base_tok = self.ast.nodes.items(.main_token)[@intFromEnum(base_node)];
+            const base_name = self.tokenSlice(base_tok);
+            if (self.imports.get(base_name) != null) return;
+        }
 
         // Struct declaration: `const Foo = struct { ... }`
         if (init_tag == .container_decl or
@@ -304,6 +334,25 @@ const Parser = struct {
             return self.parseStructDeclNamed(decl_name, init_node);
         }
 
+        // Top-level mutable declarations are treated as uniforms when they
+        // carry an explicit type annotation. If the type annotation itself is
+        // a resource wrapper, keep that resource kind instead of forcing .uniform.
+        if (std.mem.eql(u8, decl_keyword, "var")) {
+            if (vd.ast.type_node.unwrap()) |type_node| {
+                if (try self.tryParseResourceTypeDecl(decl_name, type_node)) return;
+                const uniform_type = try self.parseTypeNode(type_node);
+                try self.module.declarations.append(self.mod_alloc, .{
+                    .resource = .{
+                        .name = decl_name,
+                        .kind = .uniform,
+                        .type = uniform_type,
+                        .binding = .{},
+                    },
+                });
+                return;
+            }
+        }
+
         // Possibly a resource declaration via zsl.UniformBuffer(...) / zsl.Texture2D(...)
         if (init_tag == .call or init_tag == .call_comma or init_tag == .call_one or init_tag == .call_one_comma) {
             if (try self.tryParseResource(decl_name, init_node)) return;
@@ -311,13 +360,112 @@ const Parser = struct {
 
         // Otherwise it's a constant.
         const val_expr = try self.parseExpr(init_node);
+        // Determine the type: prefer an explicit annotation, then infer from literal.
+        const const_type: ir.Type = if (vd.ast.type_node.unwrap()) |tn|
+            try self.parseTypeNode(tn)
+        else switch (init_tag) {
+            .number_literal => blk: {
+                const tok = self.ast.nodes.items(.main_token)[@intFromEnum(init_node)];
+                const s = self.tokenSlice(tok);
+                break :blk if (std.mem.indexOfScalar(u8, s, '.') != null)
+                    ir.Type{ .scalar = .f32 }
+                else if (std.fmt.parseInt(i64, s, 0) catch null) |v|
+                    if (v >= 0) ir.Type{ .scalar = .u32 } else ir.Type{ .scalar = .i32 }
+                else
+                    ir.Type{ .scalar = .i32 };
+            },
+            else => ir.Type{ .scalar = .f32 }, // type inference placeholder
+        };
         try self.module.declarations.append(self.mod_alloc, .{
             .constant = .{
                 .name = decl_name,
-                .type = .{ .scalar = .f32 }, // type inference placeholder
+                .type = const_type,
                 .value = val_expr,
             },
         });
+    }
+
+    fn isComputeOptsTypeNode(self: *Parser, node: Ast.Node.Index) bool {
+        const tags = self.ast.nodes.items(.tag);
+        const main_tokens = self.ast.nodes.items(.main_token);
+        const tag = tags[@intFromEnum(node)];
+        if (tag == .identifier) {
+            return std.mem.eql(u8, self.tokenSlice(main_tokens[@intFromEnum(node)]), "ComputeOpts");
+        }
+        if (tag == .field_access) {
+            const field_tok = self.ast.nodeData(node).node_and_token[1];
+            if (!std.mem.eql(u8, self.tokenSlice(field_tok), "ComputeOpts")) return false;
+            const base_node = self.ast.nodeData(node).node_and_token[0];
+            const base_tok = main_tokens[@intFromEnum(base_node)];
+            const base_name = self.tokenSlice(base_tok);
+            return self.imports.get(base_name) != null;
+        }
+        return false;
+    }
+
+    fn parseComputeLocalSizeInit(self: *Parser, init_node: Ast.Node.Index) !?ir.ComputeLocalSize {
+        var size = ir.ComputeLocalSize{};
+        var saw_any = false;
+        try self.applyComputeLocalSizeFields(init_node, &size, &saw_any);
+
+        if (!saw_any) {
+            const tok = self.nodeMainToken(init_node);
+            self.err(tok, "compute options must include local_size_x, local_size_y, and/or local_size_z fields", .{});
+            return null;
+        }
+
+        if (size.x == 0 or size.y == 0 or size.z == 0) {
+            const tok = self.nodeMainToken(init_node);
+            self.err(tok, "compute local size values must be >= 1", .{});
+            return null;
+        }
+        return size;
+    }
+
+    fn applyComputeLocalSizeFields(
+        self: *Parser,
+        struct_init_node: Ast.Node.Index,
+        out: *ir.ComputeLocalSize,
+        saw_any: *bool,
+    ) !void {
+        const tags = self.ast.nodes.items(.tag);
+        const main_tokens = self.ast.nodes.items(.main_token);
+
+        const tag = tags[@intFromEnum(struct_init_node)];
+        if (tag != .struct_init_dot and
+            tag != .struct_init_dot_two and
+            tag != .struct_init_dot_two_comma and
+            tag != .struct_init_dot_comma)
+        {
+            return;
+        }
+
+        var buf: [2]Ast.Node.Index = undefined;
+        const si = self.ast.fullStructInit(&buf, struct_init_node) orelse return;
+        for (si.ast.fields) |field_value_node| {
+            const value_tok = main_tokens[@intFromEnum(field_value_node)];
+            if (value_tok < 2) continue;
+            const field_name = self.tokenSlice(value_tok - 2);
+
+            if (std.mem.eql(u8, field_name, "local_size_x") or std.mem.eql(u8, field_name, "x")) {
+                if (tags[@intFromEnum(field_value_node)] != .number_literal) continue;
+                out.x = std.fmt.parseInt(u32, self.tokenSlice(main_tokens[@intFromEnum(field_value_node)]), 10) catch continue;
+                saw_any.* = true;
+                continue;
+            }
+            if (std.mem.eql(u8, field_name, "local_size_y") or std.mem.eql(u8, field_name, "y")) {
+                if (tags[@intFromEnum(field_value_node)] != .number_literal) continue;
+                out.y = std.fmt.parseInt(u32, self.tokenSlice(main_tokens[@intFromEnum(field_value_node)]), 10) catch continue;
+                saw_any.* = true;
+                continue;
+            }
+            if (std.mem.eql(u8, field_name, "local_size_z") or std.mem.eql(u8, field_name, "z")) {
+                if (tags[@intFromEnum(field_value_node)] != .number_literal) continue;
+                out.z = std.fmt.parseInt(u32, self.tokenSlice(main_tokens[@intFromEnum(field_value_node)]), 10) catch continue;
+                saw_any.* = true;
+                continue;
+            }
+        }
     }
 
     fn tryParseResource(self: *Parser, name: []const u8, call_node: Ast.Node.Index) !bool {
@@ -345,7 +493,7 @@ const Parser = struct {
         const kind: ir.ResourceKind = blk: {
             if (std.mem.eql(u8, resource_name, "Uniform")) break :blk .uniform;
             if (std.mem.eql(u8, resource_name, "UniformBuffer")) break :blk .uniform_buffer;
-            if (std.mem.eql(u8, resource_name, "StorageBuffer")) break :blk .storage_buffer_read;
+            if (std.mem.eql(u8, resource_name, "StorageBuffer")) break :blk .storage_buffer_read_write;
             if (std.mem.eql(u8, resource_name, "Texture2D")) break :blk .texture;
             if (std.mem.eql(u8, resource_name, "Texture3D")) break :blk .texture;
             if (std.mem.eql(u8, resource_name, "TextureCube")) break :blk .texture;
@@ -368,6 +516,63 @@ const Parser = struct {
 
         // Parse binding options from the second argument (struct literal), if present.
         const opts = self.parseBindingOpts(call_node) catch .{};
+
+        try self.module.declarations.append(self.mod_alloc, .{
+            .resource = .{
+                .name = name,
+                .kind = kind,
+                .type = res_type,
+                .binding = opts,
+            },
+        });
+        return true;
+    }
+
+    fn tryParseResourceTypeDecl(self: *Parser, name: []const u8, type_node: Ast.Node.Index) !bool {
+        const tags = self.ast.nodes.items(.tag);
+        const main_tokens = self.ast.nodes.items(.main_token);
+
+        // We expect the type annotation to be a field access call:
+        // `zsl.UniformBuffer(...)`, `zsl.StorageBuffer(...)`, etc.
+        var buf1: [1]Ast.Node.Index = undefined;
+        const type_full = self.ast.fullCall(&buf1, type_node) orelse return false;
+        const fn_node = type_full.ast.fn_expr;
+        if (tags[@intFromEnum(fn_node)] != .field_access) return false;
+
+        const field_tok = self.ast.nodeData(fn_node).node_and_token[1];
+        const resource_name = self.tokenSlice(field_tok);
+
+        const base_node = self.ast.nodeData(fn_node).node_and_token[0];
+        const base_tok = main_tokens[@intFromEnum(base_node)];
+        const base_name = self.tokenSlice(base_tok);
+
+        const binding = self.imports.get(base_name) orelse return false;
+        _ = binding;
+
+        const kind: ir.ResourceKind = blk: {
+            if (std.mem.eql(u8, resource_name, "Uniform")) break :blk .uniform;
+            if (std.mem.eql(u8, resource_name, "UniformBuffer")) break :blk .uniform_buffer;
+            if (std.mem.eql(u8, resource_name, "StorageBuffer")) break :blk .storage_buffer_read_write;
+            if (std.mem.eql(u8, resource_name, "Texture2D")) break :blk .texture;
+            if (std.mem.eql(u8, resource_name, "Texture3D")) break :blk .texture;
+            if (std.mem.eql(u8, resource_name, "TextureCube")) break :blk .texture;
+            if (std.mem.eql(u8, resource_name, "Sampler")) break :blk .sampler;
+            if (std.mem.eql(u8, resource_name, "SamplerComparison")) break :blk .sampler_comparison;
+            return false;
+        };
+
+        const res_type: ir.Type = blk: {
+            if (kind == .uniform or kind == .uniform_buffer or kind == .storage_buffer_read or kind == .storage_buffer_read_write) {
+                if (type_full.ast.params.len >= 1) {
+                    const type_arg = type_full.ast.params[0];
+                    break :blk try self.parseTypeNode(type_arg);
+                }
+            }
+            const bk = self.zsl_builtins.get(resource_name) orelse break :blk .{ .named = resource_name };
+            break :blk stdlib.builtinToIrType(bk) orelse .{ .named = resource_name };
+        };
+
+        const opts = self.parseBindingOpts(type_node) catch .{};
 
         try self.module.declarations.append(self.mod_alloc, .{
             .resource = .{
@@ -461,11 +666,20 @@ const Parser = struct {
                 else
                     ir.Type{ .scalar = .f32 };
 
-                // Check for comptime `stage` parameter (ZSL entry-point convention).
-                if (std.mem.eql(u8, p_name, "stage")) {
+                // Check for comptime stage parameter (ZSL entry-point convention).
+                // Accepts both `stage: zsl.Stage.X` (named) and `_: zsl.Stage.X` (anonymous).
+                const is_stage_param = std.mem.eql(u8, p_name, "stage") or blk: {
+                    if (!std.mem.eql(u8, p_name, "_")) break :blk false;
+                    const s = if (param.type_expr) |te| self.parseStageFromTypeNode(te) else .unknown;
+                    break :blk s != .unknown;
+                };
+                if (is_stage_param) {
                     stage = if (param.type_expr) |te| self.parseStageFromTypeNode(te) else .unknown;
                     continue; // don't include in params list
                 }
+
+                // Anonymous parameters (`_: T`) are discarded in any function.
+                if (std.mem.eql(u8, p_name, "_")) continue;
 
                 try params.append(self.mod_alloc, .{
                     .name = p_name,
@@ -552,6 +766,19 @@ const Parser = struct {
         for (block) |stmt_node| {
             const stmt = self.parseStatement(stmt_node) catch continue;
             try out.append(self.mod_alloc, stmt);
+        }
+    }
+
+    fn parseStmtOrBlock(self: *Parser, node: Ast.Node.Index, out: *std.ArrayList(ir.Statement)) error{OutOfMemory}!void {
+        const tag = self.ast.nodeTag(node);
+        switch (tag) {
+            .block, .block_semicolon, .block_two, .block_two_semicolon => {
+                try self.parseBlock(node, out);
+            },
+            else => {
+                const stmt = self.parseStatement(node) catch return;
+                try out.append(self.mod_alloc, stmt);
+            },
         }
     }
 
@@ -659,6 +886,13 @@ const Parser = struct {
             .@"break" => return .{ .break_stmt = {} },
             .@"continue" => return .{ .continue_stmt = {} },
 
+            // Call expression as a statement — intercept `zsl.discard()` first.
+            .call, .call_one, .call_comma, .call_one_comma => {
+                if (self.isDiscardCall(node)) return .{ .discard = {} };
+                const expr = try self.parseExpr(node);
+                return .{ .expr_stmt = expr };
+            },
+
             else => {
                 // Treat as an expression statement.
                 const expr = try self.parseExpr(node);
@@ -667,17 +901,41 @@ const Parser = struct {
         }
     }
 
+    /// Returns true if `node` is a call expression whose callee resolves to the
+    /// stdlib `fn_discard` built-in (i.e. `zsl.discard()` or a local alias).
+    fn isDiscardCall(self: *Parser, node: Ast.Node.Index) bool {
+        var call_buf: [1]Ast.Node.Index = undefined;
+        const call_full = self.ast.fullCall(&call_buf, node) orelse return false;
+        const fn_node = call_full.ast.fn_expr;
+        const tags = self.ast.nodes.items(.tag);
+        const main_tokens = self.ast.nodes.items(.main_token);
+        var callee: []const u8 = "";
+        if (tags[@intFromEnum(fn_node)] == .identifier) {
+            callee = self.tokenSlice(main_tokens[@intFromEnum(fn_node)]);
+        } else if (tags[@intFromEnum(fn_node)] == .field_access) {
+            const field_tok = self.ast.nodeData(fn_node).node_and_token[1];
+            callee = self.tokenSlice(field_tok);
+        }
+        if (!std.mem.eql(u8, callee, "discard")) return false;
+        if (self.zsl_builtins.get(callee)) |kind| return kind == .fn_discard;
+        return false;
+    }
+
     fn parseIfStmt(self: *Parser, node: Ast.Node.Index) error{OutOfMemory}!ir.Statement {
-        const full = self.ast.ifFull(node);
+        const full = switch (self.ast.nodeTag(node)) {
+            .if_simple => self.ast.ifSimple(node),
+            .@"if" => self.ast.ifFull(node),
+            else => return .{ .block = &.{} },
+        };
         const cond = try self.parseExpr(full.ast.cond_expr);
         var then_stmts: std.ArrayList(ir.Statement) = .empty;
         defer then_stmts.deinit(self.mod_alloc);
-        try self.parseBlock(full.ast.then_expr, &then_stmts);
+        try self.parseStmtOrBlock(full.ast.then_expr, &then_stmts);
         var else_stmts: ?[]ir.Statement = null;
         if (full.ast.else_expr.unwrap()) |else_node| {
             var el: std.ArrayList(ir.Statement) = .empty;
             defer el.deinit(self.mod_alloc);
-            try self.parseBlock(else_node, &el);
+            try self.parseStmtOrBlock(else_node, &el);
             else_stmts = try self.mod_alloc.dupe(ir.Statement, el.items);
         }
         return .{ .if_stmt = .{
@@ -695,11 +953,15 @@ const Parser = struct {
     }
 
     fn parseWhileStmt(self: *Parser, node: Ast.Node.Index) error{OutOfMemory}!ir.Statement {
-        const full = self.ast.whileFull(node);
+        const full = switch (self.ast.nodeTag(node)) {
+            .while_simple => self.ast.whileSimple(node),
+            .@"while" => self.ast.whileFull(node),
+            else => return .{ .block = &.{} },
+        };
         const cond = try self.parseExpr(full.ast.cond_expr);
         var body: std.ArrayList(ir.Statement) = .empty;
         defer body.deinit(self.mod_alloc);
-        try self.parseBlock(full.ast.then_expr, &body);
+        try self.parseStmtOrBlock(full.ast.then_expr, &body);
         return .{ .while_stmt = .{
             .cond = cond,
             .body = try self.mod_alloc.dupe(ir.Statement, body.items),
@@ -742,10 +1004,19 @@ const Parser = struct {
             },
 
             .field_access => {
-                const base = try self.mod_alloc.create(ir.Expr);
-                base.* = try self.parseExpr(self.ast.nodeData(node).node_and_token[0]);
+                const base_node = self.ast.nodeData(node).node_and_token[0];
+                const base_tok = self.ast.nodes.items(.main_token)[@intFromEnum(base_node)];
+                const base_name = self.tokenSlice(base_tok);
                 const field_tok = self.ast.nodeData(node).node_and_token[1];
-                return .{ .field_access = .{ .base = base, .field = self.tokenSlice(field_tok) } };
+                const field_name = self.tokenSlice(field_tok);
+                // If the base is a known import alias (stdlib or user module), the
+                // import is merged into this module — emit just the field name.
+                if (self.imports.get(base_name) != null) {
+                    return .{ .ident = field_name };
+                }
+                const base = try self.mod_alloc.create(ir.Expr);
+                base.* = try self.parseExpr(base_node);
+                return .{ .field_access = .{ .base = base, .field = field_name } };
             },
 
             .array_access => {
@@ -755,6 +1026,10 @@ const Parser = struct {
                 const idx_expr = try self.mod_alloc.create(ir.Expr);
                 idx_expr.* = try self.parseExpr(aa_idx);
                 return .{ .index = .{ .base = base_expr, .index = idx_expr } };
+            },
+
+            .grouped_expression => {
+                return try self.parseExpr(self.ast.nodeData(node).node_and_token[0]);
             },
 
             .call, .call_one, .call_one_comma => {
@@ -1111,7 +1386,7 @@ test "parse simple struct" {
     defer mod.deinit();
 
     const src =
-        \\const PSInput = struct {
+        \\const InputData = struct {
         \\    v_pos: f32,
         \\    v_color: f32,
         \\};
@@ -1124,6 +1399,265 @@ test "parse simple struct" {
         std.debug.print("parse errors:\n{s}\n", .{aw.writer.buffer[0..aw.writer.end]});
     }
     try std.testing.expect(mod.declarations.items.len >= 1);
+}
+
+test "parse entry point with arbitrary io type names" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    const src =
+        \\const zsl = @import("zsl");
+        \\const VertexIn = struct {
+        \\    v_pos: zsl.Vec4,
+        \\};
+        \\const FragmentOut = struct {
+        \\    o_color: zsl.Vec4,
+        \\};
+        \\pub fn main(stage: zsl.Stage.fragment, data: VertexIn) FragmentOut {
+        \\    _ = stage;
+        \\    _ = data;
+        \\}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try std.testing.expectEqual(@as(usize, 3), mod.declarations.items.len);
+
+    var found_input_struct = false;
+    var found_output_struct = false;
+    var found_function = false;
+    for (mod.declarations.items) |decl| {
+        switch (decl) {
+            .struct_type => |s| {
+                if (std.mem.eql(u8, s.name, "VertexIn")) found_input_struct = true;
+                if (std.mem.eql(u8, s.name, "FragmentOut")) found_output_struct = true;
+            },
+            .function => |f| {
+                try std.testing.expectEqualStrings("main", f.name);
+                try std.testing.expectEqualStrings("VertexIn", f.params[0].type.named);
+                try std.testing.expectEqualStrings("FragmentOut", f.return_type.named);
+                found_function = true;
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expect(found_input_struct);
+    try std.testing.expect(found_output_struct);
+    try std.testing.expect(found_function);
+}
+
+test "parse pub var uniform" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    const src =
+        \\const zsl = @import("zsl");
+        \\pub var time: f32 = 0.0;
+        \\pub fn main(stage: zsl.Stage.fragment) void {
+        \\    _ = stage;
+        \\}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try std.testing.expectEqual(@as(usize, 2), mod.declarations.items.len);
+    var found_uniform = false;
+    for (mod.declarations.items) |decl| {
+        switch (decl) {
+            .resource => |r| {
+                try std.testing.expectEqualStrings("time", r.name);
+                try std.testing.expectEqual(ir.ResourceKind.uniform, r.kind);
+                try std.testing.expect(r.type.eql(.{ .scalar = .f32 }));
+                found_uniform = true;
+            },
+            .function => |f| try std.testing.expectEqualStrings("main", f.name),
+            else => {},
+        }
+    }
+    try std.testing.expect(found_uniform);
+}
+
+test "parse pub var uniform buffer" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    const src =
+        \\const zsl = @import("zsl");
+        \\const Context = struct {
+        \\    time: zsl.f32,
+        \\};
+        \\pub var context: zsl.UniformBuffer(Context, .{ .binding = 0, .space = 3 }) = undefined;
+        \\pub fn main(stage: zsl.Stage.fragment) void {
+        \\    _ = stage;
+        \\}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    var found_buffer = false;
+    for (mod.declarations.items) |decl| {
+        switch (decl) {
+            .resource => |r| {
+                if (std.mem.eql(u8, r.name, "context")) {
+                    try std.testing.expectEqual(ir.ResourceKind.uniform_buffer, r.kind);
+                    try std.testing.expectEqualStrings("Context", r.type.named);
+                    try std.testing.expectEqual(@as(u32, 0), r.binding.binding);
+                    try std.testing.expectEqual(@as(u32, 3), r.binding.space);
+                    found_buffer = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(found_buffer);
+}
+
+test "parse pub var storage buffer" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    const src =
+        \\const zsl = @import("zsl");
+        \\pub var cells: zsl.StorageBuffer(u32, .{ .binding = 1 }) = undefined;
+        \\pub fn main(stage: zsl.Stage.compute) void {
+        \\    _ = stage;
+        \\}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    var found_buffer = false;
+    for (mod.declarations.items) |decl| {
+        switch (decl) {
+            .resource => |r| {
+                if (std.mem.eql(u8, r.name, "cells")) {
+                    try std.testing.expectEqual(ir.ResourceKind.storage_buffer_read_write, r.kind);
+                    try std.testing.expect(r.type.eql(.{ .scalar = .u32 }));
+                    try std.testing.expectEqual(@as(u32, 1), r.binding.binding);
+                    found_buffer = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(found_buffer);
+}
+
+test "parse single-line if return statements" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    const src =
+        \\const zsl = @import("zsl");
+        \\fn wrapPrev(value: u32, limit: u32) u32 {
+        \\    if (value == 0) return limit - 1;
+        \\    return value - 1;
+        \\}
+        \\pub fn main(stage: zsl.Stage.compute) void {
+        \\    _ = stage;
+        \\    _ = wrapPrev(0, 1);
+        \\}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try std.testing.expectEqual(@as(usize, 0), errors.count());
+
+    var found_wrap = false;
+    for (mod.declarations.items) |decl| {
+        switch (decl) {
+            .function => |f| {
+                if (std.mem.eql(u8, f.name, "wrapPrev")) {
+                    found_wrap = true;
+                    try std.testing.expect(f.body.len >= 2);
+                    try std.testing.expect(f.body[0] == .if_stmt);
+                    try std.testing.expect(f.body[0].if_stmt.then.len == 1);
+                    try std.testing.expect(f.body[0].if_stmt.then[0] == .return_stmt);
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(found_wrap);
+}
+
+test "parse parenthesized unary if condition" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    const src =
+        \\const zsl = @import("zsl");
+        \\pub fn main(stage: zsl.Stage.compute) void {
+        \\    _ = stage;
+        \\    if (!(1 == 2 and 3 == 4)) {
+        \\        return;
+        \\    }
+        \\}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try std.testing.expectEqual(@as(usize, 0), errors.count());
+
+    var found_main = false;
+    var found_if = false;
+    for (mod.declarations.items) |decl| {
+        switch (decl) {
+            .function => |f| {
+                if (std.mem.eql(u8, f.name, "main")) {
+                    found_main = true;
+                    try std.testing.expect(f.body.len >= 1);
+                    for (f.body) |stmt| {
+                        if (stmt == .if_stmt) {
+                            try std.testing.expect(stmt.if_stmt.cond == .unary);
+                            found_if = true;
+                            break;
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(found_main);
+    try std.testing.expect(found_if);
 }
 
 test "stdlib import path detection" {
@@ -1159,4 +1693,126 @@ test "parse stdlib import via path" {
     try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 0), errors.count());
     try std.testing.expectEqual(@as(usize, 0), mod.imported_paths.items.len);
+}
+
+test "parse module-level compute local size" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    const src =
+        \\const zsl = @import("zsl");
+        \\pub const compute: zsl.ComputeOpts = .{ .local_size_x = 8, .local_size_y = 4, .local_size_z = 2 };
+        \\pub fn main(_: zsl.Stage.compute) void {
+        \\}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try std.testing.expectEqual(@as(usize, 0), errors.count());
+    try std.testing.expect(mod.compute_local_size != null);
+    const size = mod.compute_local_size.?;
+    try std.testing.expectEqual(@as(u32, 8), size.x);
+    try std.testing.expectEqual(@as(u32, 4), size.y);
+    try std.testing.expectEqual(@as(u32, 2), size.z);
+}
+
+test "anonymous stage param `_: zsl.Stage.X` is recognised as entry point" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    const src =
+        \\const zsl = @import("zsl");
+        \\pub fn main(_: zsl.Stage.fragment) void {}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try std.testing.expectEqual(@as(usize, 0), errors.count());
+    var found = false;
+    for (mod.declarations.items) |decl| {
+        if (decl == .function and std.mem.eql(u8, decl.function.name, "main")) {
+            try std.testing.expect(decl.function.is_entry_point);
+            try std.testing.expectEqual(ir.ShaderStage.fragment, decl.function.stage);
+            try std.testing.expectEqual(@as(usize, 0), decl.function.params.len);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "anonymous `_: T` params in non-entry-point functions are silently dropped" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    // A helper function with one named param and one anonymous `_: f32` param.
+    // The anonymous param must not appear in the IR.
+    const src =
+        \\const zsl = @import("zsl");
+        \\fn helper(x: f32, _: f32) f32 { return x; }
+        \\pub fn main(_: zsl.Stage.fragment) void {}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try std.testing.expectEqual(@as(usize, 0), errors.count());
+    var found = false;
+    for (mod.declarations.items) |decl| {
+        if (decl == .function and std.mem.eql(u8, decl.function.name, "helper")) {
+            try std.testing.expectEqual(@as(usize, 1), decl.function.params.len);
+            try std.testing.expectEqualStrings("x", decl.function.params[0].name);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "import field-access alias (const abs = zsl.abs) is silently skipped" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, "test.zsl");
+    defer mod.deinit();
+
+    const src =
+        \\const zsl = @import("zsl");
+        \\const sin = zsl.sin;
+        \\const abs = zsl.abs;
+        \\pub var time: f32 = 0.0;
+        \\pub fn main(_: zsl.Stage.fragment) void {}
+    ;
+
+    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try std.testing.expectEqual(@as(usize, 0), errors.count());
+    // sin/abs aliases must NOT appear as constants or resources.
+    for (mod.declarations.items) |decl| {
+        switch (decl) {
+            .constant => |c| {
+                try std.testing.expect(!std.mem.eql(u8, c.name, "sin"));
+                try std.testing.expect(!std.mem.eql(u8, c.name, "abs"));
+            },
+            else => {},
+        }
+    }
 }

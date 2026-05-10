@@ -52,6 +52,12 @@ pub const ScalarKind = enum {
 
 pub const AddressSpace = enum { uniform, storage, texture, sampler, input, output, local };
 
+pub const ComputeLocalSize = struct {
+    x: u32 = 1,
+    y: u32 = 1,
+    z: u32 = 1,
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Type System
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,6 +373,8 @@ pub const Module = struct {
     /// Canonical absolute path of the source file.
     path: []const u8,
     declarations: std.ArrayList(Declaration),
+    /// Optional compute workgroup size configured from source.
+    compute_local_size: ?ComputeLocalSize = null,
     /// Paths of imported modules (already de-duplicated by ImportResolver).
     imported_paths: std.ArrayList([]const u8),
 
@@ -411,6 +419,10 @@ pub const Module = struct {
             }
         }
         return null;
+    }
+
+    pub fn resolvedComputeLocalSize(self: *const Module) ComputeLocalSize {
+        return self.compute_local_size orelse .{};
     }
 };
 
