@@ -3,55 +3,65 @@
 // The ZSL compiler reads this and emits HLSL / GLSL / MSL / SPIR-V (requires glslangValidator tool) / DXIL (requires dxc tool).
 
 const zsl = @import("../zsl.zig");
+const sin = zsl.sin;
+const cos = zsl.cos;
+const abs = zsl.abs;
+const Stage = zsl.Stage;
+const Vec2 = zsl.Vec2;
+const Vec4 = zsl.Vec4;
+const UniformBuffer = zsl.UniformBuffer;
+const Texture2D = zsl.Texture2D;
+const Sampler = zsl.Sampler;
 
 // ── Resources ─────────────────────────────────────────────────────────────────
 
 /// Uniform buffer at binding=0, space=3.
 const Context = struct {
-    resolution: zsl.Vec2,
-    cursor: zsl.Vec2,
-    time: zsl.f32,
+    resolution: Vec2,
+    cursor: Vec2,
+    time: f32,
 };
 
-const context = zsl.UniformBuffer(Context, .{ .binding = 0, .space = 3 });
+const context = UniformBuffer(Context, .{ .binding = 0, .space = 3 });
 
 /// Texture and sampler at binding=0, space=2.
-const u_texture = zsl.Texture2D(.{ .binding = 0, .space = 2 });
-const u_sampler = zsl.Sampler(.{ .binding = 0, .space = 2 });
+const u_texture = Texture2D(.{ .binding = 0, .space = 2 });
+const u_sampler = Sampler(.{ .binding = 0, .space = 2 });
 
 // ── I/O Structs ───────────────────────────────────────────────────────────────
 
 const PSInput = struct {
-    /// zsl.SVPosition
-    v_pos: zsl.Vec4,
-    /// zsl.Color(0)
-    v_color: zsl.Vec4,
-    /// zsl.TexCoord(0)
-    v_uv: zsl.Vec2,
+    /// SVPosition
+    v_pos: Vec4,
+    /// Color(0)
+    v_color: Vec4,
+    /// TexCoord(0)
+    v_uv: Vec2,
 };
 
 const PSOutput = struct {
-    /// zsl.SVTarget(0)
-    o_color: zsl.Vec4,
+    /// SVTarget(0)
+    o_color: Vec4,
 };
 
 // ── Entry Point ───────────────────────────────────────────────────────────────
 
 /// Fragment shader entry point.
 /// The `stage` parameter (comptime) tells the ZSL compiler this is a fragment shader.
-pub fn main(stage: zsl.Stage.fragment, input: PSInput) PSOutput {
-    _ = stage;
+pub fn main(_: Stage.fragment, input: PSInput) PSOutput {
     var output: PSOutput = undefined;
 
-    var uv: zsl.Vec2 = input.v_uv;
+    var uv: Vec2 = input.v_uv;
     uv = uv + context.cursor / context.resolution / 4.0;
 
-    var clr: zsl.f32 = 0.0;
-    clr += zsl.sin(uv.x * zsl.cos(context.time / 15.0) * 80.0) + zsl.cos(uv.y * zsl.cos(context.time / 15.0) * 10.0);
-    clr += zsl.sin(uv.y * zsl.sin(context.time / 10.0) * 40.0) + zsl.cos(uv.x * zsl.sin(context.time / 25.0) * 40.0);
-    clr += zsl.sin(uv.x * zsl.sin(context.time / 5.0) * 10.0) + zsl.sin(uv.y * zsl.sin(context.time / 35.0) * 80.0);
-    clr *= zsl.sin(context.time / 10.0) * 0.5;
+    var clr: f32 = 0.0;
+    clr += sin(uv.x * cos(context.time / 15.0) * 80.0) + cos(uv.y * cos(context.time / 15.0) * 10.0);
+    clr += sin(uv.y * sin(context.time / 10.0) * 40.0) + cos(uv.x * sin(context.time / 25.0) * 40.0);
+    clr += sin(uv.x * sin(context.time / 5.0) * 10.0) + sin(uv.y * sin(context.time / 35.0) * 80.0);
+    clr *= sin(context.time / 10.0) * 0.5;
 
-    output.o_color = zsl.Vec4{ clr, clr * 0.5, zsl.sin(clr + context.time / 3.0) * 0.75, 1.0 };
-    return output;
+    //output.o_color = Vec4{ clr, clr * 0.5, sin(clr + context.time / 3.0) * 0.75, 1.0 };
+    const o_color = Vec4{ clr, clr * 0.5, sin(clr + context.time / 3.0) * 0.75, 1.0 };
+    //return output;
+    return .{ .o_color = o_color };
 }

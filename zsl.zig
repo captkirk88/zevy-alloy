@@ -80,14 +80,10 @@ pub fn Uniform(comptime T: type, comptime _: BindingOpts) type {
     return T;
 }
 
-/// Deprecated: prefer top-level `pub var name: T = ...;` uniforms in `.zsl`
-/// sources. This wrapper remains for compatibility with older shaders.
 pub fn UniformBuffer(comptime _: type, comptime _: BindingOpts) type {
     return struct {};
 }
 
-/// Deprecated: prefer top-level `pub var name: T = ...;` uniforms in `.zsl`
-/// sources. This wrapper remains for compatibility with older shaders.
 pub fn StorageBuffer(comptime _: type, comptime _: BindingOpts) type {
     return struct {};
 }

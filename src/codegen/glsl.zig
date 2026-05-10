@@ -93,6 +93,11 @@ const GlslEmitter = struct {
     /// `layout(location=N)` qualifiers (required for SPIRV compilation).
     spirv_compat: bool = false,
     next_uniform_location: u32 = 0,
+    /// Tracks local variable names that clash with a GLSL `out` variable of the same
+    /// name in the current entry function. Such locals are emitted as `_l_{name}`.
+    /// Cleared at the start of each function. Capacity covers typical output field counts.
+    output_conflict_buf: [16][]const u8 = undefined,
+    output_conflict_count: u8 = 0,
 
     fn findStruct(self: *GlslEmitter, name: []const u8) ?*const ir.StructDecl {
         for (self.module.declarations.items) |*decl| {
@@ -102,6 +107,20 @@ const GlslEmitter = struct {
             }
         }
         return null;
+    }
+
+    fn hasOutputConflict(self: *const GlslEmitter, name: []const u8) bool {
+        for (self.output_conflict_buf[0..self.output_conflict_count]) |n| {
+            if (std.mem.eql(u8, n, name)) return true;
+        }
+        return false;
+    }
+
+    fn addOutputConflict(self: *GlslEmitter, name: []const u8) void {
+        if (self.output_conflict_count < self.output_conflict_buf.len) {
+            self.output_conflict_buf[self.output_conflict_count] = name;
+            self.output_conflict_count += 1;
+        }
     }
 
     fn isUniformBufferType(self: *GlslEmitter, name: []const u8) bool {
@@ -303,6 +322,8 @@ const GlslEmitter = struct {
         }
 
         self.indent += 1;
+        // Clear per-function local-rename tracking.
+        self.output_conflict_count = 0;
 
         // Prolog: for each struct-typed entry-point param, construct the local struct
         // variable from the individual `in` variables so the body can use e.g. input.v_uv.
@@ -400,6 +421,7 @@ const GlslEmitter = struct {
                     .named => |struct_name| {
                         if (self.findStruct(struct_name)) |s| {
                             for (s.fields, 0..) |field, fi| {
+                                if (field.semantic.kind == .frag_depth) continue; // gl_FragDepth built-in
                                 if (self.version == .glsl450) {
                                     try self.wfmt("layout(location = {d}) out {s} {s};\n", .{
                                         fi, glslTypeName(field.type), field.name,
@@ -450,10 +472,32 @@ const GlslEmitter = struct {
                     try self.wfmt("{s}const uvec3 {s} = gl_GlobalInvocationID;\n", .{ ind, glslIdentName(v.name) });
                     return;
                 }
+                // Detect conflict: local name matches a GLSL out-var name → rename local to _l_{name}.
+                const is_conflict = blk: {
+                    if (self.entry_output_struct) |struct_name| {
+                        if (self.findStruct(struct_name)) |s| {
+                            for (s.fields) |field| {
+                                if (std.mem.eql(u8, field.name, v.name)) {
+                                    self.addOutputConflict(v.name);
+                                    break :blk true;
+                                }
+                            }
+                        }
+                    }
+                    break :blk false;
+                };
                 if (v.type) |t| {
-                    try self.wfmt("{s}{s} {s}", .{ ind, glslTypeName(t), glslIdentName(v.name) });
+                    if (is_conflict) {
+                        try self.wfmt("{s}{s} _l_{s}", .{ ind, glslTypeName(t), glslIdentName(v.name) });
+                    } else {
+                        try self.wfmt("{s}{s} {s}", .{ ind, glslTypeName(t), glslIdentName(v.name) });
+                    }
                 } else {
-                    try self.wfmt("{s}/* auto */ float {s}", .{ ind, glslIdentName(v.name) });
+                    if (is_conflict) {
+                        try self.wfmt("{s}/* auto */ float _l_{s}", .{ ind, glslIdentName(v.name) });
+                    } else {
+                        try self.wfmt("{s}/* auto */ float {s}", .{ ind, glslIdentName(v.name) });
+                    }
                 }
                 if (v.init) |*init| {
                     try self.w(" = ");
@@ -473,20 +517,44 @@ const GlslEmitter = struct {
                     // Entry point returning a struct: copy each field to its out-var,
                     // then emit a bare return (void main cannot return a value).
                     if (self.entry_output_struct) |struct_name| {
-                        if (val.* == .ident) {
-                            if (self.findStruct(struct_name)) |s| {
-                                for (s.fields) |field| {
-                                    const dest = if (field.semantic.kind == .position)
-                                        "gl_Position"
-                                    else
-                                        field.name;
-                                    try self.wfmt("{s}{s} = {s}.{s};\n", .{
-                                        ind, dest, glslIdentName(val.ident), field.name,
-                                    });
+                        switch (val.*) {
+                            .ident => {
+                                if (self.findStruct(struct_name)) |s| {
+                                    for (s.fields) |field| {
+                                        switch (field.semantic.kind) {
+                                            .position => try self.wfmt("{s}gl_Position = {s}.{s};\n", .{ ind, glslIdentName(val.ident), field.name }),
+                                            .frag_depth => try self.wfmt("{s}gl_FragDepth = {s}.{s};\n", .{ ind, glslIdentName(val.ident), field.name }),
+                                            else => try self.wfmt("{s}{s} = {s}.{s};\n", .{ ind, field.name, glslIdentName(val.ident), field.name }),
+                                        }
+                                    }
+                                    try self.wfmt("{s}return;\n", .{ind});
+                                    return;
                                 }
-                                try self.wfmt("{s}return;\n", .{ind});
-                                return;
-                            }
+                            },
+                            .construct => |c| {
+                                // Named struct-init return: `.{ .field = val, ... }`
+                                if (c.field_names.len > 0) {
+                                    if (self.findStruct(struct_name)) |s| {
+                                        for (s.fields) |field| {
+                                            for (c.field_names, c.args) |fname, *arg| {
+                                                if (std.mem.eql(u8, fname, field.name)) {
+                                                    switch (field.semantic.kind) {
+                                                        .position => try self.wfmt("{s}gl_Position = ", .{ind}),
+                                                        .frag_depth => try self.wfmt("{s}gl_FragDepth = ", .{ind}),
+                                                        else => try self.wfmt("{s}{s} = ", .{ ind, field.name }),
+                                                    }
+                                                    try self.emitExpr(arg);
+                                                    try self.w(";\n");
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        try self.wfmt("{s}return;\n", .{ind});
+                                        return;
+                                    }
+                                }
+                            },
+                            else => {},
                         }
                     }
                     try self.w(ind);
@@ -561,7 +629,13 @@ const GlslEmitter = struct {
             },
             .literal_uint => |v| try self.wfmt("{d}u", .{v}),
             .literal_bool => |v| try self.w(if (v) "true" else "false"),
-            .ident => |name| try self.w(glslIdentName(name)),
+            .ident => |name| {
+                if (self.hasOutputConflict(name)) {
+                    try self.wfmt("_l_{s}", .{glslIdentName(name)});
+                } else {
+                    try self.w(glslIdentName(name));
+                }
+            },
             .field_access => |fa| {
                 try self.emitExpr(fa.base);
                 try self.wfmt(".{s}", .{fa.field});

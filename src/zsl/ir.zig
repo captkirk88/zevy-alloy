@@ -148,14 +148,22 @@ pub const BindingOpts = struct {
 pub const SemanticKind = enum {
     none,
     position, // SV_Position / gl_Position
+    
     target, // SV_Target(n)
-    tex_coord, // TEXCOORD(n)
-    color, // COLOR(n)
+    /// SV_TexCoord(n) / gl_MultiViewVar(n) / user-defined in GLSL
+    tex_coord,
+    /// SV_Color(n) / gl_
+    color,
+    /// SV_Normal / gl_Normal
     normal,
+    /// SV_Tangent / gl_Tangent
     tangent,
+    /// SV_InstanceID / gl_InstanceID
     instance_id,
+    /// SV_VertexID / gl_VertexID
     vertex_id,
-    frag_depth, // SV_Depth / gl_FragDepth
+    /// SV_Depth / gl_FragDepth
+    frag_depth,
 };
 
 pub const Semantic = struct {
@@ -307,6 +315,9 @@ pub const Expr = union(enum) {
     pub const ConstructExpr = struct {
         type: Type,
         args: []const Expr,
+        /// Field names for named struct-init syntax (`.{ .x = val, .y = val2 }`).
+        /// Empty slice for positional constructors (vector / array inits).
+        field_names: []const []const u8 = &.{},
     };
 
     pub const TernaryExpr = struct {

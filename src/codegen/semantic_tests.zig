@@ -180,21 +180,28 @@ test "SVTarget(1) emits indexed color-output semantic" {
 }
 
 test "TexCoord(0) emits interpolant semantic in all backends" {
+    // Use an INPUT struct so the TexCoord field gets location = 0 in GLSL.
     const src =
         \\const zsl = @import("zsl");
-        \\const VSOut = struct {
-        \\    /// zsl.SVPosition
-        \\    pos: zsl.Vec4,
+        \\const VSIn = struct {
         \\    /// zsl.TexCoord(0)
         \\    uv: zsl.Vec2,
         \\};
-        \\pub fn vs(stage: zsl.Stage.vertex) VSOut {
-        \\    return .{ .pos = .{ 0, 0, 0, 1 }, .uv = .{ 0, 0 } };
+        \\const VSOut = struct {
+        \\    /// zsl.SVPosition
+        \\    pos: zsl.Vec4,
+        \\};
+        \\pub fn vs(stage: zsl.Stage.vertex, i: VSIn) VSOut {
+        \\    _ = i;
+        \\    var out: VSOut = undefined;
+        \\    out.pos = zsl.Vec4{ 0, 0, 0, 1 };
+        \\    return out;
         \\}
     ;
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
-    try h.expectGlsl("layout(location = 0)");
+    // GLSL: input attribute at location 0 (first field of the input struct).
+    try h.expectGlsl("layout(location = 0) in vec2 uv");
     try h.expectHlsl("TEXCOORD0");
     try h.expectMsl("[[user(locn0)]]");
 }
@@ -448,7 +455,8 @@ test "StorageBuffer emits storage buffer declaration in GLSL and HLSL" {
     defer h.deinit();
     try h.expectGlsl("layout(std430, binding = 2) buffer dataBlock");
     try h.expectHlsl("RWStructuredBuffer");
-    try h.expectMsl("// storage buffer 'data' [[buffer(2)]]");
+    // MSL: resource injected as entry-point function parameter.
+    try h.expectMsl("device uint* data [[buffer(2)]]");
 }
 
 test "Texture2D emits sampler2D in GLSL, Texture2D in HLSL, texture2d in MSL" {
@@ -461,7 +469,8 @@ test "Texture2D emits sampler2D in GLSL, Texture2D in HLSL, texture2d in MSL" {
     defer h.deinit();
     try h.expectGlsl("sampler2D tex");
     try h.expectHlsl("Texture2D tex");
-    try h.expectMsl("// texture 'tex' [[texture(0)]]");
+    // MSL: resource injected as entry-point function parameter.
+    try h.expectMsl("texture2d<float> tex [[texture(0)]]");
 }
 
 test "Sampler emits sampler declaration in HLSL and MSL" {
@@ -473,7 +482,8 @@ test "Sampler emits sampler declaration in HLSL and MSL" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectHlsl("SamplerState samp");
-    try h.expectMsl("// sampler 'samp' [[sampler(1)]]");
+    // MSL: resource injected as entry-point function parameter.
+    try h.expectMsl("sampler samp [[sampler(1)]]");
     // GLSL combines samplers with textures; standalone sampler is emitted as comment.
     try h.expectGlsl("// sampler 'samp' is combined with texture");
 }
@@ -487,7 +497,8 @@ test "SamplerComparison emits comparison sampler in HLSL and MSL" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectHlsl("SamplerComparisonState shadow");
-    try h.expectMsl("// sampler 'shadow' [[sampler(3)]]");
+    // MSL: resource injected as entry-point function parameter.
+    try h.expectMsl("sampler shadow [[sampler(3)]]");
 }
 
 // ── discard ───────────────────────────────────────────────────────────────────

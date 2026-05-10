@@ -231,7 +231,9 @@ pub fn main(init: std.process.Init) !void {
             out_w.interface.print("Wrote {s}: {s} ({d} bytes)\n", .{ output.name, spec.path, content.len }) catch {};
         } else if (output.err_message) |msg| {
             err_w.interface.print("{s} generator failed: {s}\n", .{ output.name, msg }) catch {};
-            if (!std.mem.eql(u8, msg, "ExternalCompilerNotFound")) {
+            if (!std.mem.eql(u8, msg, "ExternalCompilerNotFound") and
+                !std.mem.eql(u8, msg, "ExternalCompilerFailed"))
+            {
                 had_error = true;
             }
         }

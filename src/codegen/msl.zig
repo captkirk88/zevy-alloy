@@ -44,6 +44,18 @@ const MslEmitter = struct {
     writer: *std.Io.Writer,
     indent: u32 = 0,
     module: *const ir.Module,
+    /// Non-null when inside an entry-point whose return type is a named struct.
+    entry_output_struct: ?[]const u8 = null,
+
+    fn findStruct(self: *MslEmitter, name: []const u8) ?*const ir.StructDecl {
+        for (self.module.declarations.items) |*decl| {
+            switch (decl.*) {
+                .struct_type => |*s| if (std.mem.eql(u8, s.name, name)) return s,
+                else => {},
+            }
+        }
+        return null;
+    }
 
     fn w(self: *MslEmitter, bytes: []const u8) iface.GenerateError!void {
         self.writer.writeAll(bytes) catch return error.IoError;
@@ -159,6 +171,12 @@ const MslEmitter = struct {
     }
 
     fn emitFunction(self: *MslEmitter, f: *const ir.FunctionDecl) iface.GenerateError!void {
+        self.entry_output_struct = if (f.is_entry_point) switch (f.return_type) {
+            .named => |n| n,
+            else => null,
+        } else null;
+        defer self.entry_output_struct = null;
+
         const qualifier: []const u8 = if (f.is_entry_point) switch (f.stage) {
             .vertex => "vertex",
             .fragment => "fragment",
@@ -314,6 +332,27 @@ const MslEmitter = struct {
             },
             .return_stmt => |maybe_val| {
                 if (maybe_val) |*val| {
+                    // Named struct-init return: expand to temp var + field assignments.
+                    if (self.entry_output_struct) |struct_name| {
+                        if (val.* == .construct and val.construct.field_names.len > 0) {
+                            if (self.findStruct(struct_name)) |s| {
+                                const tmp = "__ret_val";
+                                try self.wfmt("{s}{s} {s};", .{ ind, struct_name, tmp });
+                                for (s.fields) |field| {
+                                    for (val.construct.field_names, val.construct.args) |fname, *arg| {
+                                        if (std.mem.eql(u8, fname, field.name)) {
+                                            try self.wfmt("\n{s}{s}.{s} = ", .{ ind, tmp, field.name });
+                                            try self.emitExpr(arg);
+                                            try self.w(";");
+                                            break;
+                                        }
+                                    }
+                                }
+                                try self.wfmt("\n{s}return {s};\n", .{ ind, tmp });
+                                return;
+                            }
+                        }
+                    }
                     try self.w(ind);
                     try self.w("return ");
                     try self.emitExpr(val);

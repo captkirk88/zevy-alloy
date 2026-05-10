@@ -103,7 +103,8 @@ pub const SpirvGenerator = struct {
                 error.EndOfStream => "end of stream",
                 else => "unknown error",
             };
-            writer.print("// glslangValidator/glslc error:\n// {s}\n", .{stderr}) catch {};
+            defer alloc.free(stderr);
+            std.debug.print("glslangValidator/glslc error:\n// {s}\n", .{stderr});
             return error.ExternalCompilerFailed;
         }
 

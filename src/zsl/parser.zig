@@ -50,6 +50,8 @@ const Parser = struct {
     zsl_builtins: *const std.StringHashMap(stdlib.BuiltinKind),
     /// name †’ alias binding (e.g. `const zsl = @import("zsl")` †’ "zsl")
     imports: std.StringHashMap(ImportBinding),
+    /// local aliases: `const X = zsl.Y` → BuiltinKind of Y (for resource constructors).
+    local_aliases: std.StringHashMap(stdlib.BuiltinKind),
     resolver: *ImportResolver,
 
     const ImportBinding = union(enum) {
@@ -78,34 +80,41 @@ const Parser = struct {
             .module = module,
             .zsl_builtins = zsl_builtins,
             .imports = std.StringHashMap(ImportBinding).init(mod_alloc),
+            .local_aliases = std.StringHashMap(stdlib.BuiltinKind).init(mod_alloc),
             .resolver = resolver,
         };
     }
 
     fn deinit(self: *Parser) void {
         self.imports.deinit();
+        self.local_aliases.deinit();
     }
 
     //  Source Position Helpers
 
+    /// Returns the line number (1-based) of the given token, for error reporting.
     fn tokenLine(self: *const Parser, token: Ast.TokenIndex) u32 {
         const loc = self.ast.tokenLocation(0, token);
         return @intCast(loc.line + 1);
     }
 
+    /// Returns the column number (1-based) of the given token, for error reporting.
     fn tokenColumn(self: *const Parser, token: Ast.TokenIndex) u32 {
         const loc = self.ast.tokenLocation(0, token);
         return @intCast(loc.column + 1);
     }
 
+    /// Returns the source slice corresponding to a token.
     fn tokenSlice(self: *const Parser, token: Ast.TokenIndex) []const u8 {
         return self.ast.tokenSlice(token);
     }
 
+    /// Returns the main token of a node, which is typically the most relevant token for error reporting.
     fn nodeMainToken(self: *const Parser, node: Ast.Node.Index) Ast.TokenIndex {
         return self.ast.nodes.items(.main_token)[@intFromEnum(node)];
     }
 
+    /// Returns the source line corresponding to a line number (1-based). Used for error context.
     fn sourceLine(self: *const Parser, line_no: u32) ?[]const u8 {
         var line: u32 = 1;
         var start: usize = 0;
@@ -190,6 +199,23 @@ const Parser = struct {
                 const canonical = try self.resolver.resolve(self.mod_alloc, importer_dir, import_path);
                 try self.imports.put(var_name, .{ .user_module = canonical });
                 try self.module.imported_paths.append(self.mod_alloc, canonical);
+            }
+        }
+
+        // Also handle `const X = zsl.Y` where Y is a known ZSL builtin.
+        // This lets users write `const UniformBuffer = zsl.UniformBuffer;` and use
+        // `UniformBuffer(...)` as a resource constructor without qualification.
+        if (node_tags[@intFromEnum(init_node)] == .field_access) {
+            const base_node = self.ast.nodeData(init_node).node_and_token[0];
+            const base_tok = main_tokens[@intFromEnum(base_node)];
+            const base_name = self.tokenSlice(base_tok);
+            if (self.imports.get(base_name) != null) {
+                // base is a stdlib/user-module alias; record the field as a local alias.
+                const field_tok = self.ast.nodeData(init_node).node_and_token[1];
+                const field_name = self.tokenSlice(field_tok);
+                if (self.zsl_builtins.get(field_name)) |kind| {
+                    try self.local_aliases.put(var_name, kind);
+                }
             }
         }
     }
@@ -472,22 +498,31 @@ const Parser = struct {
         const tags = self.ast.nodes.items(.tag);
         const main_tokens = self.ast.nodes.items(.main_token);
 
-        // We expect the callee to be a field access: `zsl.UniformBuffer`
         var buf1: [1]Ast.Node.Index = undefined;
         const call_full = self.ast.fullCall(&buf1, call_node) orelse return false;
         const fn_node = call_full.ast.fn_expr;
-        if (tags[@intFromEnum(fn_node)] != .field_access) return false;
 
-        const field_tok = self.ast.nodeData(fn_node).node_and_token[1];
-        const resource_name = self.tokenSlice(field_tok);
-
-        const base_node = self.ast.nodeData(fn_node).node_and_token[0];
-        const base_tok = main_tokens[@intFromEnum(base_node)];
-        const base_name = self.tokenSlice(base_tok);
-
-        // Check that base_name is a known stdlib import alias.
-        const binding = self.imports.get(base_name) orelse return false;
-        _ = binding; // We only care that it's the stdlib.
+        // Resolve the resource constructor name and validate it comes from the stdlib.
+        // Supports both `zsl.UniformBuffer(...)` (field_access) and
+        // `UniformBuffer(...)` (identifier, via `const UniformBuffer = zsl.UniformBuffer`).
+        const resource_name: []const u8 = switch (tags[@intFromEnum(fn_node)]) {
+            .field_access => blk: {
+                const base_node = self.ast.nodeData(fn_node).node_and_token[0];
+                const base_tok = main_tokens[@intFromEnum(base_node)];
+                const base_name = self.tokenSlice(base_tok);
+                if (self.imports.get(base_name) == null) return false;
+                const field_tok = self.ast.nodeData(fn_node).node_and_token[1];
+                break :blk self.tokenSlice(field_tok);
+            },
+            .identifier => blk: {
+                const ident_tok = main_tokens[@intFromEnum(fn_node)];
+                const ident = self.tokenSlice(ident_tok);
+                // Must be a locally-aliased stdlib builtin.
+                if (self.local_aliases.get(ident) == null) return false;
+                break :blk ident;
+            },
+            else => return false,
+        };
 
         // Map resource_name to a ResourceKind.
         const kind: ir.ResourceKind = blk: {
@@ -532,22 +567,30 @@ const Parser = struct {
         const tags = self.ast.nodes.items(.tag);
         const main_tokens = self.ast.nodes.items(.main_token);
 
-        // We expect the type annotation to be a field access call:
+        // We expect the type annotation to be a field access call or an aliased identifier call:
         // `zsl.UniformBuffer(...)`, `zsl.StorageBuffer(...)`, etc.
+        // Also handles `UniformBuffer(...)` via `const UniformBuffer = zsl.UniformBuffer`.
         var buf1: [1]Ast.Node.Index = undefined;
         const type_full = self.ast.fullCall(&buf1, type_node) orelse return false;
         const fn_node = type_full.ast.fn_expr;
-        if (tags[@intFromEnum(fn_node)] != .field_access) return false;
 
-        const field_tok = self.ast.nodeData(fn_node).node_and_token[1];
-        const resource_name = self.tokenSlice(field_tok);
-
-        const base_node = self.ast.nodeData(fn_node).node_and_token[0];
-        const base_tok = main_tokens[@intFromEnum(base_node)];
-        const base_name = self.tokenSlice(base_tok);
-
-        const binding = self.imports.get(base_name) orelse return false;
-        _ = binding;
+        const resource_name: []const u8 = switch (tags[@intFromEnum(fn_node)]) {
+            .field_access => blk: {
+                const base_node = self.ast.nodeData(fn_node).node_and_token[0];
+                const base_tok = main_tokens[@intFromEnum(base_node)];
+                const base_name = self.tokenSlice(base_tok);
+                if (self.imports.get(base_name) == null) return false;
+                const field_tok = self.ast.nodeData(fn_node).node_and_token[1];
+                break :blk self.tokenSlice(field_tok);
+            },
+            .identifier => blk: {
+                const ident_tok = main_tokens[@intFromEnum(fn_node)];
+                const ident = self.tokenSlice(ident_tok);
+                if (self.local_aliases.get(ident) == null) return false;
+                break :blk ident;
+            },
+            else => return false,
+        };
 
         const kind: ir.ResourceKind = blk: {
             if (std.mem.eql(u8, resource_name, "Uniform")) break :blk .uniform;
@@ -815,9 +858,14 @@ const Parser = struct {
                     }
                     break :blk try self.parseExpr(ini);
                 } else null;
+                // When no explicit type annotation, infer from the init expression.
+                const resolved_type: ?ir.Type = var_type orelse if (init_expr) |ie| switch (ie) {
+                    .construct => |c| c.type,
+                    else => null,
+                } else null;
                 return .{ .var_decl = .{
                     .name = vname,
-                    .type = var_type,
+                    .type = resolved_type,
                     .init = init_expr,
                     .mutable = true,
                 } };
@@ -1155,6 +1203,8 @@ const Parser = struct {
         // Gather field values (for struct_init) or args.
         var args: std.ArrayList(ir.Expr) = .empty;
         defer args.deinit(self.mod_alloc);
+        var field_names: std.ArrayList([]const u8) = .empty;
+        defer field_names.deinit(self.mod_alloc);
 
         var buf: [2]Ast.Node.Index = undefined;
         const si = self.ast.fullStructInit(&buf, node);
@@ -1164,6 +1214,14 @@ const Parser = struct {
                 type_expr = try self.parseTypeNode(te);
             }
             for (s.ast.fields) |f| {
+                // Named struct-init: `.fieldname = value`.
+                // The field name identifier token is always 2 positions before the
+                // first token of the value expression:
+                //   `.` `fieldname` `=` [first-token-of-value]
+                // So: first_token_of_value - 2 = fieldname.
+                const first = self.ast.firstToken(f);
+                const name = try self.mod_alloc.dupe(u8, self.ast.tokenSlice(first - 2));
+                try field_names.append(self.mod_alloc, name);
                 try args.append(self.mod_alloc, try self.parseExpr(f));
             }
         }
@@ -1171,6 +1229,7 @@ const Parser = struct {
         return .{ .construct = .{
             .type = type_expr,
             .args = try self.mod_alloc.dupe(ir.Expr, args.items),
+            .field_names = try self.mod_alloc.dupe([]const u8, field_names.items),
         } };
     }
 

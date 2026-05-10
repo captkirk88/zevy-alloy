@@ -39,7 +39,7 @@ const Velocity = struct {
     y: f32,
 };
 
-const Sprite = struct {
+const Circle = struct {
     radius: f32,
     color: rl.Color,
 };
@@ -98,7 +98,7 @@ fn movementSystem(
 // Example system that renders circles based on their Position and Sprite components
 fn renderSystem(
     manager: zevy_ecs.params.Commands,
-    query: zevy_ecs.params.Query(struct { pos: Position, sprite: Sprite }),
+    query: zevy_ecs.params.Query(struct { pos: Position, sprite: Circle }),
     shader_res: zevy_ecs.params.Res(CircleColorShader),
     tick_res: zevy_ecs.params.Res(ShaderTick),
 ) !void {
@@ -118,7 +118,7 @@ fn renderSystem(
 
     while (query.next()) |item| {
         const pos: *Position = item.pos;
-        const sprite: *Sprite = item.sprite;
+        const sprite: *Circle = item.sprite;
         const hue_value: f32 = @as(f32, @floatFromInt(sprite.color.r)) / 255.0;
 
         if (shader_state.hue_loc >= 0) {
@@ -344,7 +344,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .x = (random.float(f32) - 0.5) * 200.0, // pixels per second
                 .y = (random.float(f32) - 0.5) * 200.0, // pixels per second
             },
-            Sprite{
+            Circle{
                 .radius = 10 + random.float(f32) * 20,
                 .color = rl.Color{ .r = hue_byte, .g = 0, .b = 0, .a = 255 },
             },
