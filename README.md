@@ -2,6 +2,7 @@
 
 > Experimental: zevy-alloy is early-stage and may change in breaking ways.
 > Metal support is currently untested, open to contributions and testers.
+> HLSL output is currently untested, open to contributions and testers.
 
 zevy-alloy is a ZSL shader compiler and build integration library for Zig projects.
 It compiles `.zsl` shader sources to multiple targets, including GLSL 450, GLSL 330,
