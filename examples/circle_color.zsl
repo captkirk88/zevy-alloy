@@ -1,10 +1,7 @@
 // circle_color.zsl — Per-entity circle color fragment shader.
-// Reads per-entity hue from v_color.x (packed as r/255), computes a
-// time-driven RGB color using sin waves, and outputs it.
-//
-// The input/output struct names are arbitrary; only the field semantics and
-// entry point stage matter. This example keeps the `main` entry point but the
-// input/output type names can be changed freely.
+// Each entity passes its rl.Color via drawCircleV, which raylib delivers as the
+// v_color vertex attribute (0.0–1.0 per channel).  The three color channels drive
+// independent sin-wave phases so every circle animates with a unique color cycle.
 
 const zsl = @import("../zsl.zig");
 const sin = zsl.sin;
@@ -12,7 +9,6 @@ const abs = zsl.abs;
 // ── Shader uniforms ───────────────────────────────────────────────────────────
 
 pub var time: f32 = 0.0;
-pub var hue: f32 = 0.0;
 
 // ── I/O structs ───────────────────────────────────────────────────────────────
 
@@ -32,13 +28,14 @@ const CircleOutput = struct {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn main(_: zsl.Stage.fragment, _: CircleInput) CircleOutput {
+pub fn main(_: zsl.Stage.fragment, input: CircleInput) CircleOutput {
     const tau: f32 = 6.2831853;
-    const base: f32 = tau * hue + time;
-
-    const r: f32 = abs(sin(base));
-    const g: f32 = abs(sin(base + tau / 3.0));
-    const b: f32 = abs(sin(base + tau * 2.0 / 3.0));
+    // v_color.xyz carries the entity's spawn color (0.0–1.0).  Each channel
+    // becomes an independent phase offset so circles with different colors
+    // animate differently even when `time` is identical.
+    const r: f32 = abs(sin(tau * input.v_color.x + time));
+    const g: f32 = abs(sin(tau * input.v_color.y + time + tau / 3.0));
+    const b: f32 = abs(sin(tau * input.v_color.z + time + tau * 2.0 / 3.0));
     var output: CircleOutput = undefined;
     output.o_color = zsl.Vec4{ r, g, b, 1.0 };
     return output;

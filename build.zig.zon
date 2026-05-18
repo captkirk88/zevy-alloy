@@ -28,8 +28,8 @@
         //     .path = "../zevy_raylib",
         // },
         .zevy_raylib = .{
-            .url = "git+https://github.com/captkirk88/zevy-raylib#e257228ff5c8d755830bcd73db6ef5e7eee4d7ca",
-            .hash = "zevy_raylib-0.2.0-6RwEiTELGgC47yMQUc6w86Y_QR1VW43ektFT2nO0uejp",
+            .url = "git+https://github.com/captkirk88/zevy-raylib#d4fb9190d373665200a589c93792ff79c1f65715",
+            .hash = "zevy_raylib-0.2.0-6RwEif0KGgAQHYUARl66H8spYH-6bdCQTXk87ote61Vo",
         },
         .raylib_zig = .{
             .url = "git+https://github.com/raylib-zig/raylib-zig#97be2c7ae646a2f09856604b138c427c0af1b952",

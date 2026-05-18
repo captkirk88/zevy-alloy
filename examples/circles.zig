@@ -96,8 +96,8 @@ fn updateCircleShaderUniformsSystem(
 // switching GPU state only when the active shader changes between entities.
 // Because all circle entities share the same compiled shader program, the batcher
 // calls beginShaderMode exactly once and endShaderMode once via defer.
-// The `hue` uniform varies per entity so it is set inline after the batcher activates
-// the shader; `time` was already pushed to the GPU by updateCircleShaderUniformsSystem.
+// Per-entity color is carried as a vertex attribute (v_color) via the rl.Color
+// passed to drawCircleV — no per-entity uniform needed.
 fn renderSystem(
     _: zevy_ecs.params.Commands,
     query: zevy_ecs.params.Query(struct { pos: Position, sprite: Circle, shader: ?ShaderComponent }),
@@ -108,18 +108,7 @@ fn renderSystem(
     defer batcher.finish();
 
     while (query.next()) |item| {
-        const sc: ?*ShaderComponent = item.shader;
-        const sprite: *Circle = item.sprite;
         batcher.begin(item.shader);
-        if (sc) |shader| {
-            shader.setUniform("hue", .{
-                .float = @as(f32, @floatFromInt(sprite.color.r)) / 255.0,
-            }) catch {};
-            const compiled = shader.getShader(assets);
-            if (compiled) |gpu_shader| {
-                shader.applyUniforms(gpu_shader);
-            }
-        }
         rl.drawCircleV(rl.Vector2{ .x = item.pos.x, .y = item.pos.y }, item.sprite.radius, item.sprite.color);
     }
 }
