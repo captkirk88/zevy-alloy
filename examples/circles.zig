@@ -108,7 +108,8 @@ fn renderSystem(
     defer batcher.finish();
 
     while (query.next()) |item| {
-        batcher.begin(item.shader);
+        const shader: ?*ShaderComponent = item.shader;
+        batcher.begin(shader);
         rl.drawCircleV(rl.Vector2{ .x = item.pos.x, .y = item.pos.y }, item.sprite.radius, item.sprite.color);
     }
 }
