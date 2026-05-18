@@ -140,17 +140,6 @@ pub fn build(b: *std.Build) !void {
 
     const shaders_step = compileShaders(b, exe, &.{
         .{
-            .zsl = "assets/plasma.zsl",
-            .outputs = &.{
-                .{ .format = .glsl450, .path = "assets/plasma.450.frag.glsl" },
-                .{ .format = .glsles300, .path = "assets/plasma.es.frag.glsl" },
-                .{ .format = .hlsl, .path = "assets/plasma.hlsl" },
-                .{ .format = .msl, .path = "assets/plasma.metal" },
-                .{ .format = .spirv, .path = "assets/plasma.spv" },
-                .{ .format = .dxil, .path = "assets/plasma.dxil" },
-            },
-        },
-        .{
             .zsl = "examples/circle_color.zsl",
             .outputs = &.{
                 .{ .format = .glsl330, .path = "examples/circle_color.330.frag.glsl" },
@@ -193,6 +182,11 @@ pub fn build(b: *std.Build) !void {
 
     const zevy_raylib_dep = b.dependency("zevy_raylib", .{ .target = target, .optimize = optimize });
     const zevy_raylib_mod = zevy_raylib_dep.module("zevy_raylib");
+    // Force zevy_raylib to use the same zevy_ecs package as the rest of the project.
+    // Without this, zevy_raylib resolves zevy_ecs from its own vendored copy, causing
+    // Manager type mismatches when systems.zig checks ParamRegistry.apply signatures.
+    zevy_raylib_mod.addImport("zevy_ecs", zevy_ecs_mod);
+    zevy_raylib_mod.addImport("plugins", plugins_mod);
 
     const circles_mod = b.createModule(.{
         .root_source_file = b.path("examples/circles.zig"),

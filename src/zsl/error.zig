@@ -68,7 +68,6 @@ pub const ZslError = struct {
 pub const ErrorList = struct {
     alloc: std.mem.Allocator,
     errors: std.ArrayList(ZslError),
-    has_error: bool = false,
 
     pub fn init(alloc: std.mem.Allocator) ErrorList {
         return .{
@@ -102,7 +101,6 @@ pub const ErrorList = struct {
             .caret_column = caret_column,
             .notes = notes,
         });
-        if (severity == .err) self.has_error = true;
     }
 
     pub fn addError(

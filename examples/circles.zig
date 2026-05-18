@@ -20,9 +20,15 @@ const UIPlugin = zevy_raylib.UIPlugin;
 const AssetsPlugin = zevy_raylib.AssetsPlugin;
 const InputPlugin = zevy_raylib.InputPlugin;
 const ParamRegistry = zevy_raylib.RaylibParamRegistry;
+const ShaderComponent = zevy_raylib.graphics.shader.ShaderComponent;
+const ShaderBatcher = zevy_raylib.graphics.shader.ShaderBatcher;
+const cleanupShaderSystem = zevy_raylib.graphics.shader.cleanupShaderSystem;
+const Assets = zevy_raylib.Assets;
+const ShaderLoader = zevy_raylib.ShaderLoader;
 
+const builtin = @import("builtin");
 const CIRCLE_COUNT = 10_000;
-const CIRCLE_SHADER_PATH = "examples/circle_color.330.frag.glsl";
+const CIRCLE_SHADER_PATH = if (builtin.target.abi.isAndroid()) "examples/circle_color.es.frag.glsl" else "examples/circle_color.450.frag.glsl";
 const COLOR_STEP_TICKS: u32 = 2;
 
 const DeltaTime = f32;
@@ -43,35 +49,6 @@ const Circle = struct {
     radius: f32,
     color: rl.Color,
 };
-
-const CircleColorShader = struct {
-    shader: rl.Shader,
-    time_loc: i32,
-    hue_loc: i32,
-};
-
-fn loadCircleShader(allocator: std.mem.Allocator) !CircleColorShader {
-    const shader_path_z = try allocator.dupeZ(u8, CIRCLE_SHADER_PATH);
-    defer allocator.free(shader_path_z);
-
-    const shader = try rl.loadShader(null, shader_path_z);
-    if (!rl.isShaderValid(shader)) return error.InvalidShader;
-
-    return .{
-        .shader = shader,
-        .time_loc = rl.getShaderLocation(shader, "time"),
-        .hue_loc = rl.getShaderLocation(shader, "hue"),
-    };
-}
-
-fn unloadCircleShader(ecs: *zevy_ecs.Manager) void {
-    if (ecs.getResource(CircleColorShader)) |shader_ptr| {
-        defer shader_ptr.deinit();
-        const shader_lock = shader_ptr.lockRead();
-        defer shader_lock.deinit();
-        rl.unloadShader(shader_lock.get().shader);
-    }
-}
 
 // Example system that updates entity positions
 fn movementSystem(
@@ -95,41 +72,89 @@ fn movementSystem(
     }
 }
 
-// Example system that renders circles based on their Position and Sprite components
-fn renderSystem(
-    manager: zevy_ecs.params.Commands,
-    query: zevy_ecs.params.Query(struct { pos: Position, sprite: Circle }),
-    shader_res: zevy_ecs.params.Res(CircleColorShader),
+/// Updates the `time` uniform on circle entities' ShaderComponents.
+/// All circle entities share the same compiled GPU program so setting the uniform
+/// on any one of them is sufficient — `rl.setShaderValue` targets the program directly.
+fn updateCircleShaderUniformsSystem(
+    _: zevy_ecs.params.Commands,
+    query: zevy_ecs.params.Query(struct { shader: ShaderComponent }),
     tick_res: zevy_ecs.params.Res(ShaderTick),
+    assets_res: zevy_ecs.params.Res(Assets),
 ) !void {
-    _ = manager;
-
-    const shader_state = shader_res.get();
+    _ = assets_res;
     const tick_value = tick_res.get().*;
     const quantized_tick = (tick_value / COLOR_STEP_TICKS) * COLOR_STEP_TICKS;
     const time_value: f32 = @as(f32, @floatFromInt(quantized_tick)) / 60.0;
-
-    if (shader_state.time_loc >= 0) {
-        rl.setShaderValue(shader_state.shader, shader_state.time_loc, @ptrCast(&time_value), .float);
+    while (query.next()) |item| {
+        const sc: *ShaderComponent = item.shader;
+        try sc.setUniform("time", .{ .float = time_value });
+        break; // all circles share the same GPU program — one call is enough
     }
+}
 
-    rl.beginShaderMode(shader_state.shader);
-    defer rl.endShaderMode();
+// Renders circles. ShaderBatcher handles beginShaderMode/endShaderMode per entity,
+// switching GPU state only when the active shader changes between entities.
+// Because all circle entities share the same compiled shader program, the batcher
+// calls beginShaderMode exactly once and endShaderMode once via defer.
+// The `hue` uniform varies per entity so it is set inline after the batcher activates
+// the shader; `time` was already pushed to the GPU by updateCircleShaderUniformsSystem.
+fn renderSystem(
+    _: zevy_ecs.params.Commands,
+    query: zevy_ecs.params.Query(struct { pos: Position, sprite: Circle, shader: ?ShaderComponent }),
+    assets_res: zevy_ecs.params.Res(Assets),
+) !void {
+    const assets = assets_res.get();
+    var batcher = ShaderBatcher.init(assets);
+    defer batcher.finish();
 
     while (query.next()) |item| {
-        const pos: *Position = item.pos;
+        const sc: ?*ShaderComponent = item.shader;
         const sprite: *Circle = item.sprite;
-        const hue_value: f32 = @as(f32, @floatFromInt(sprite.color.r)) / 255.0;
-
-        if (shader_state.hue_loc >= 0) {
-            rl.setShaderValue(shader_state.shader, shader_state.hue_loc, @ptrCast(&hue_value), .float);
+        batcher.begin(item.shader);
+        if (sc) |shader| {
+            shader.setUniform("hue", .{
+                .float = @as(f32, @floatFromInt(sprite.color.r)) / 255.0,
+            }) catch {};
+            const compiled = shader.getShader(assets);
+            if (compiled) |gpu_shader| {
+                shader.applyUniforms(gpu_shader);
+            }
         }
+        rl.drawCircleV(rl.Vector2{ .x = item.pos.x, .y = item.pos.y }, item.sprite.radius, item.sprite.color);
+    }
+}
 
-        rl.drawCircleV(
-            rl.Vector2{ .x = pos.x, .y = pos.y },
-            sprite.radius,
-            sprite.color,
-        );
+/// Startup system: compiles the circle fragment shader and spawns all circle entities.
+/// Runs once in the Startup stage (single system → main thread, GL context current).
+/// Loading `rl.Shader` here avoids `resolveShaderSystem` running on a worker thread
+/// where the GL context is not current (which caused `glCreateShader` to return 0).
+fn circleStartupSystem(
+    commands: zevy_ecs.params.Commands,
+    assets_res: zevy_ecs.params.ResMut(Assets),
+) !void {
+    const assets = assets_res.get();
+    const shader_handle = try assets.loadAsset(rl.Shader, CIRCLE_SHADER_PATH, ShaderLoader.LoadSettings.frag);
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    for (0..CIRCLE_COUNT) |_| {
+        const hue_byte: u8 = @intFromFloat(random.float(f32) * 255.0);
+        var ent = try commands.create();
+        defer ent.deinit();
+        try ent.add(Position, .{
+            .x = random.float(f32) * @as(f32, @floatFromInt(rl.getScreenWidth())),
+            .y = random.float(f32) * @as(f32, @floatFromInt(rl.getScreenHeight())),
+        });
+        try ent.add(Velocity, .{
+            .x = (random.float(f32) - 0.5) * 200.0,
+            .y = (random.float(f32) - 0.5) * 200.0,
+        });
+        try ent.add(Circle, .{
+            .radius = 10 + random.float(f32) * 20,
+            .color = rl.Color.init(random.intRangeAtMost(u8, 0, 255), random.intRangeAtMost(u8, 0, 255), hue_byte, 255),
+        });
+        try ent.add(ShaderComponent, ShaderComponent.initResolved(commands.allocator(), shader_handle));
     }
 }
 
@@ -159,23 +184,23 @@ fn buttonClickedSystem(
 }
 
 // Main game loop system
-fn gameLoop(ecs: *zevy_ecs.Manager, scheduler: *zevy_ecs.schedule.Scheduler) !zevy_raylib.ExitAppEvent {
-    var accumulator: f32 = 0.0;
+fn gameLoop(io: std.Io, ecs: *zevy_ecs.Manager, scheduler: *zevy_ecs.schedule.Scheduler) !zevy_raylib.ExitAppEvent {
     const fixed_dt: f32 = 1.0 / 60.0; // 1/60 for physics/logic updates
+    var accum = zevy_raylib.FixedTimestepAccumulator.init(fixed_dt);
     const dt_ptr = try ecs.addResource(DeltaTime, fixed_dt);
     defer dt_ptr.deinit();
     const shader_tick_ptr = try ecs.addResource(ShaderTick, 0);
     defer shader_tick_ptr.deinit();
 
-    var eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreStartup), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.First).subtract(1));
+    var eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreStartup), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.First).sub(1));
     if (eg.hasErrors()) {
         std.log.err("Errors during PreStartup -> First stages", .{});
         try eg.throw();
     }
 
     var exit_app_event: zevy_raylib.ExitAppEvent = .Success;
-    while (!rl.windowShouldClose()) {
-        eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.First), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreUpdate).subtract(1));
+    while (!zevy_raylib.shouldClose(io)) {
+        eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.First), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreUpdate).sub(1));
         if (eg.hasErrors()) {
             std.log.err("Errors during First -> PreUpdate stages", .{});
             try eg.throw();
@@ -191,14 +216,9 @@ fn gameLoop(ecs: *zevy_ecs.Manager, scheduler: *zevy_ecs.schedule.Scheduler) !ze
                 }
             }
         }
-        const frame_time = rl.getFrameTime();
-        var clamped_frame_time = frame_time;
-        if (clamped_frame_time > 0.25) clamped_frame_time = 0.25; // clamp to avoid spiral of death
 
-        accumulator += clamped_frame_time;
-        // Run game logic updates in fixed timesteps for consistency
-        var updates: usize = 0;
-        while (accumulator >= fixed_dt) : (accumulator -= fixed_dt) {
+        accum.beginFrame();
+        while (accum.consumeTick()) {
             {
                 const dt_lock = dt_ptr.lockWrite();
                 dt_lock.get().* = fixed_dt;
@@ -211,14 +231,11 @@ fn gameLoop(ecs: *zevy_ecs.Manager, scheduler: *zevy_ecs.schedule.Scheduler) !ze
             }
 
             // Run PreUpdate stage (input updates happen here)
-            eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreUpdate), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreDraw).subtract(1));
+            eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreUpdate), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreDraw).sub(1));
             if (eg.hasErrors()) {
                 std.log.err("Errors during PreUpdate -> PreDraw stages", .{});
                 try eg.throw();
             }
-
-            updates += 1;
-            if (updates > 5) break; // avoid too many catch-up updates per frame
         }
 
         // Render
@@ -227,8 +244,8 @@ fn gameLoop(ecs: *zevy_ecs.Manager, scheduler: *zevy_ecs.schedule.Scheduler) !ze
 
         rl.clearBackground(rl.Color.black);
 
-        // Run render systems (extended to include UI stage at PostDraw + 1000)
-        eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreDraw), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Last).subtract(1));
+        // Run render systems (extended to include UI stage at PostDraw -> Last - 1)
+        eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreDraw), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Last).sub(1));
         if (eg.hasErrors()) {
             std.log.err("Errors during PreDraw -> Last stages", .{});
             try eg.throw();
@@ -238,8 +255,7 @@ fn gameLoop(ecs: *zevy_ecs.Manager, scheduler: *zevy_ecs.schedule.Scheduler) !ze
         rl.drawFPS(10, 10);
         // draw tps
         var tps_buf: [32]u8 = undefined;
-        const tps = @as(usize, @intFromFloat(@as(f32, @floatFromInt(updates)) / fixed_dt));
-        const tps_text = std.fmt.bufPrintZ(&tps_buf, "TPS: {d}", .{tps}) catch "TPS: ?";
+        const tps_text = std.fmt.bufPrintZ(&tps_buf, "TPS: {d}", .{zevy_raylib.getTPS(&accum)}) catch "TPS: ?";
         rl.drawText(
             tps_text,
             10,
@@ -253,6 +269,12 @@ fn gameLoop(ecs: *zevy_ecs.Manager, scheduler: *zevy_ecs.schedule.Scheduler) !ze
         var buf: [128]u8 = undefined;
         const entity_count = try std.fmt.bufPrintZ(&buf, "Total Entities: {d}", .{CIRCLE_COUNT});
         rl.drawText(entity_count, 10, 100, 16, rl.Color.white);
+
+        eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Last), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Exit).sub(1));
+        if (eg.hasErrors()) {
+            std.log.err("Errors during PreDraw -> Last stages", .{});
+            try eg.throw();
+        }
     }
 
     eg = scheduler.runStages(ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Exit), zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Max));
@@ -265,8 +287,9 @@ fn gameLoop(ecs: *zevy_ecs.Manager, scheduler: *zevy_ecs.schedule.Scheduler) !ze
 }
 
 pub fn main(init: std.process.Init) !u8 {
-    const allocator = init.gpa;
-
+    var debug_allocator = std.heap.DebugAllocator(.{ .stack_trace_frames = 50 }).init;
+    defer _ = debug_allocator.deinit();
+    const allocator = debug_allocator.allocator(); //init.gpa;
     // Initialize ECS
     var ecs = try zevy_ecs.Manager.init(allocator);
     defer ecs.deinit();
@@ -300,19 +323,6 @@ pub fn main(init: std.process.Init) !u8 {
     std.log.info("Building plugins...", .{});
     try plugin_manager.build(&ecs);
 
-    const circle_shader = try loadCircleShader(allocator);
-    {
-        const shader_ptr = try ecs.addResource(CircleColorShader, circle_shader);
-        shader_ptr.deinit();
-    }
-    defer unloadCircleShader(&ecs);
-
-    // Load the icon atlas
-    var assets_ptr = ecs.getResource(zevy_raylib.Assets) orelse return error.MissingAssets;
-    defer assets_ptr.deinit();
-    const assets_lock = assets_ptr.lockWrite();
-    defer assets_lock.deinit();
-
     // Get the scheduler that was created by the plugins
     const scheduler = blk: {
         var scheduler_ptr = ecs.getResource(zevy_ecs.schedule.Scheduler) orelse return error.MissingScheduler;
@@ -322,34 +332,16 @@ pub fn main(init: std.process.Init) !u8 {
         const scheduler = scheduler_guard.get();
         // Register our custom systems
         std.log.info("Registering custom systems...", .{});
-        scheduler.addSystem(&ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PostUpdate), buttonClickedSystem, zevy_ecs.DefaultParamRegistry);
-        scheduler.addSystem(&ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Update), movementSystem, zevy_ecs.DefaultParamRegistry);
-        scheduler.addSystem(&ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Draw), renderSystem, zevy_ecs.DefaultParamRegistry);
+        // circleStartupSystem compiles the shader and creates all circle entities (Startup,
+        // single system → main thread). cleanupShaderSystem unloads the GPU program on Exit.
+        scheduler.addSystem(&ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Startup), circleStartupSystem, ParamRegistry);
+        scheduler.addSystem(&ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PreDraw), updateCircleShaderUniformsSystem, ParamRegistry);
+        scheduler.addSystem(&ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Update), movementSystem, ParamRegistry);
+        scheduler.addSystem(&ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Draw), renderSystem, ParamRegistry);
+        scheduler.addSystem(&ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.PostUpdate), buttonClickedSystem, ParamRegistry);
+        scheduler.addSystem(&ecs, zevy_ecs.schedule.Stage(zevy_ecs.schedule.Stages.Exit), cleanupShaderSystem, ParamRegistry);
         break :blk scheduler;
     };
-
-    // Create some example entities
-    std.log.info("Creating example entities...", .{});
-    var prng = std.Random.DefaultPrng.init(42);
-    const random = prng.random();
-
-    for (0..CIRCLE_COUNT) |_| {
-        const hue_byte: u8 = @intFromFloat(random.float(f32) * 255.0);
-        _ = ecs.create(.{
-            Position{
-                .x = random.float(f32) * @as(f32, @floatFromInt(rl.getScreenWidth())),
-                .y = random.float(f32) * @as(f32, @floatFromInt(rl.getScreenHeight())),
-            },
-            Velocity{
-                .x = (random.float(f32) - 0.5) * 200.0, // pixels per second
-                .y = (random.float(f32) - 0.5) * 200.0, // pixels per second
-            },
-            Circle{
-                .radius = 10 + random.float(f32) * 20,
-                .color = rl.Color{ .r = hue_byte, .g = 0, .b = 0, .a = 255 },
-            },
-        });
-    }
 
     // Showing how to use gui
     const root_container = ecs.create(.{
@@ -360,7 +352,7 @@ pub fn main(init: std.process.Init) !u8 {
     const close_button = ecs.create(.{
         ui.components.UIRect.init(0, 0, 100, 50),
         ui.components.UIButton.init("Close Me"),
-        ui.components.UIInputKey.initSingle(input.InputKey{ .keyboard = input.KeyCode.key_enter }),
+        //ui.components.UIInputKey.initSingle(input.InputKey{ .keyboard = input.KeyCode.key_enter }),
         layout.AnchorLayout.init(.top_right),
         CloseMeButtonTag{},
     });
@@ -377,7 +369,7 @@ pub fn main(init: std.process.Init) !u8 {
     std.log.info("Starting game loop...", .{});
 
     // Run the game loop
-    const exit_code: u8 = @intFromEnum(try gameLoop(&ecs, scheduler));
+    const exit_code: u8 = @intFromEnum(try gameLoop(init.io, &ecs, scheduler));
 
     std.log.info("Shutting down...", .{});
 

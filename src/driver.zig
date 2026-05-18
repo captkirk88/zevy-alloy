@@ -34,7 +34,7 @@ pub const CompileResult = struct {
     }
 
     pub fn hasErrors(self: *const CompileResult) bool {
-        return self.errors.has_error;
+        return self.errors.count() > 0;
     }
 
     /// Print all diagnostics and generator errors to writer.
@@ -117,7 +117,7 @@ pub fn compile(
             .err_message = null,
         };
 
-        if (errors.has_error) {
+        if (errors.count() > 0 and !opts.continue_on_generator_error) {
             outputs[i].err_message = "skipped: parse errors";
             continue;
         }

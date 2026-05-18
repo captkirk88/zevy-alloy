@@ -1,4 +1,4 @@
-const zsl = @import("zsl");
+const zsl = @import("../zsl.zig");
 const util = @import("util.zsl");
 
 pub const compute: zsl.ComputeOpts = .{ .local_size_x = 64, .local_size_y = 1, .local_size_z = 1 };

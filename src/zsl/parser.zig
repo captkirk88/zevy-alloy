@@ -1413,7 +1413,7 @@ pub fn parse(
     try parser.parseTopLevel();
     try resolver.markDone(file_path);
 
-    if (errors.has_error) return error.ParseFailed;
+    if (errors.count() > 0) return error.ParseFailed;
 }
 
 //  Tests
