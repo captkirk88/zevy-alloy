@@ -32,7 +32,7 @@ pub fn detect(io: std.Io, name: []const u8) bool {
 pub fn run(io: std.Io, argv: []const []const u8) RunError!ExitResult {
     var child = std.process.spawn(io, .{
         .argv = argv,
-        .stdout = .pipe,
+        .stdout = .ignore,
         .stderr = .pipe,
     }) catch |e| switch (e) {
         error.AccessDenied,
@@ -46,8 +46,8 @@ pub fn run(io: std.Io, argv: []const []const u8) RunError!ExitResult {
 
     const max_output = 1024 * 1024; // 1 MB cap
     var buf: [max_output]u8 = undefined;
-    const stdout_reader = child.stdout.?.reader(io, &buf);
-    const stderr_reader = child.stderr.?.reader(io, &buf);
+    const stdout_reader = if (child.stdout) |stdout| stdout.reader(io, &buf).interface else std.Io.Reader.fixed(&.{}) ;
+    const stderr_reader = if (child.stderr) |stderr| stderr.reader(io, &buf).interface else std.Io.Reader.fixed(&.{}) ;
 
     const term = child.wait(io) catch return error.IoError;
     const code: u32 = switch (term) {
@@ -55,5 +55,5 @@ pub fn run(io: std.Io, argv: []const []const u8) RunError!ExitResult {
         else => 1,
     };
 
-    return .{ .exit_code = code, .stdout = stdout_reader.interface, .stderr = stderr_reader.interface };
+    return .{ .exit_code = code, .stdout = stdout_reader, .stderr = stderr_reader };
 }

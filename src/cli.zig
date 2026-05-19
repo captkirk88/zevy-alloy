@@ -266,22 +266,53 @@ fn parseDxilShaderModel(value: []const u8) !zsl.DxilShaderModel {
     return error.InvalidArgument;
 }
 
-fn appendDefaultOutSpecs(input_path: []const u8, alloc: std.mem.Allocator, out_specs: *std.ArrayList(OutSpec)) !void {
+fn stageGlslSuffix(stage: zsl.ir.ShaderStage) ?[]const u8 {
+    return switch (stage) {
+        .vertex => "vert",
+        .fragment => "frag",
+        .geometry => "geom",
+        .tessellation_control => "tesc",
+        .tessellation_eval => "tese",
+        .compute, .unknown => null,
+    };
+}
+
+pub fn appendDefaultOutSpecs(input_path: []const u8, stage: zsl.ir.ShaderStage, alloc: std.mem.Allocator, out_specs: *std.ArrayList(OutSpec)) !void {
     const stem = std.fs.path.stem(input_path);
     const dir = std.fs.path.dirname(input_path) orelse ".";
-    const defaults = [_]struct { kind: []const u8, suffix: []const u8, ext: []const u8 }{
-        .{ .kind = "hlsl", .suffix = "", .ext = "hlsl" },
-        .{ .kind = "glsl450", .suffix = "", .ext = "glsl" },
-        .{ .kind = "glsl330", .suffix = ".330", .ext = "glsl" },
-        .{ .kind = "glsles300", .suffix = ".es", .ext = "glsl" },
-        .{ .kind = "msl", .suffix = "", .ext = "metal" },
-        .{ .kind = "spirv", .suffix = "", .ext = "spv" },
-        .{ .kind = "dxil", .suffix = "", .ext = "dxil" },
-    };
-    for (defaults) |d| {
-        const path = try std.fmt.allocPrint(alloc, "{s}/{s}{s}.{s}", .{ dir, stem, d.suffix, d.ext });
-        out_specs.append(alloc, .{ .kind = d.kind, .path = path }) catch return error.OutOfMemory;
+    const glsl_suffix = stageGlslSuffix(stage);
+
+    const hlsl_path = try std.fmt.allocPrint(alloc, "{s}/{s}.hlsl", .{ dir, stem });
+    try out_specs.append(alloc, .{ .kind = "hlsl", .path = hlsl_path });
+
+    if (glsl_suffix) |suffix| {
+        const glsl450_path = try std.fmt.allocPrint(alloc, "{s}/{s}.450.{s}.glsl", .{ dir, stem, suffix });
+        try out_specs.append(alloc, .{ .kind = "glsl450", .path = glsl450_path });
+
+        const glsl330_path = try std.fmt.allocPrint(alloc, "{s}/{s}.330.{s}.glsl", .{ dir, stem, suffix });
+        try out_specs.append(alloc, .{ .kind = "glsl330", .path = glsl330_path });
+
+        const glsles300_path = try std.fmt.allocPrint(alloc, "{s}/{s}.es.{s}.glsl", .{ dir, stem, suffix });
+        try out_specs.append(alloc, .{ .kind = "glsles300", .path = glsles300_path });
+    } else {
+        const glsl450_path = try std.fmt.allocPrint(alloc, "{s}/{s}.glsl", .{ dir, stem });
+        try out_specs.append(alloc, .{ .kind = "glsl450", .path = glsl450_path });
+
+        const glsl330_path = try std.fmt.allocPrint(alloc, "{s}/{s}.glsl", .{ dir, stem });
+        try out_specs.append(alloc, .{ .kind = "glsl330", .path = glsl330_path });
+
+        const glsles300_path = try std.fmt.allocPrint(alloc, "{s}/{s}.glsl", .{ dir, stem });
+        try out_specs.append(alloc, .{ .kind = "glsles300", .path = glsles300_path });
     }
+
+    const msl_path = try std.fmt.allocPrint(alloc, "{s}/{s}.metal", .{ dir, stem });
+    try out_specs.append(alloc, .{ .kind = "msl", .path = msl_path });
+
+    const spirv_path = try std.fmt.allocPrint(alloc, "{s}/{s}.spv", .{ dir, stem });
+    try out_specs.append(alloc, .{ .kind = "spirv", .path = spirv_path });
+
+    const dxil_path = try std.fmt.allocPrint(alloc, "{s}/{s}.dxil", .{ dir, stem });
+    try out_specs.append(alloc, .{ .kind = "dxil", .path = dxil_path });
 }
 
 pub fn parseArgs(args: []const []const u8, alloc: std.mem.Allocator) !Parsed {
@@ -356,10 +387,6 @@ pub fn parseArgs(args: []const []const u8, alloc: std.mem.Allocator) !Parsed {
                 }
             },
         }
-    }
-
-    if (out_specs.items.len == 0) {
-        try appendDefaultOutSpecs(input_path, alloc, &out_specs);
     }
 
     return .{

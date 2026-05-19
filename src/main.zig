@@ -230,9 +230,16 @@ fn commandCompile(init: std.process.Init, parsed: cli.Parsed, out_w: *std.Io.Wri
     const alloc = init.arena.allocator();
     const source_and_path = try readSourceAndAbsPath(init, alloc, parsed.input_path, err_w);
 
+    const stage = try parseStage(init.io, alloc, source_and_path.source, source_and_path.abs_path, err_w);
+
+    var out_specs = parsed.out_specs;
+    if (out_specs.items.len == 0) {
+        try cli.appendDefaultOutSpecs(parsed.input_path, stage, alloc, &out_specs);
+    }
+
     var requested_gens = try selectGenerators(
         alloc,
-        parsed.out_specs.items,
+        out_specs.items,
         parsed.spirv_target_env,
         parsed.spirv_target_spv,
         parsed.dxil_shader_model,
@@ -251,7 +258,7 @@ fn commandCompile(init: std.process.Init, parsed: cli.Parsed, out_w: *std.Io.Wri
 
     var had_error = false;
     for (result.outputs, 0..) |output, idx| {
-        const spec = parsed.out_specs.items[idx];
+        const spec = out_specs.items[idx];
         if (output.content) |content| {
             if (std.fs.path.dirname(spec.path)) |parent| {
                 std.Io.Dir.cwd().createDirPath(init.io, parent) catch |e| switch (e) {
@@ -287,8 +294,13 @@ fn commandValidate(init: std.process.Init, parsed: cli.Parsed, out_w: *std.Io.Wr
 
     const stage = try parseStage(init.io, alloc, source_and_path.source, source_and_path.abs_path, err_w);
 
+    var out_specs = parsed.out_specs;
+    if (out_specs.items.len == 0) {
+        try cli.appendDefaultOutSpecs(parsed.input_path, stage, alloc, &out_specs);
+    }
+
     var had_error = false;
-    for (parsed.out_specs.items) |spec| {
+    for (out_specs.items) |spec| {
         if (!validateOne(init, alloc, spec, stage, parsed.dxil_shader_model, out_w, err_w)) {
             had_error = true;
         }
