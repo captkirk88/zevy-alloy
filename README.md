@@ -37,8 +37,13 @@ zig build shaders
 ### CLI
 
 ```bash
-zevy-alloy compile <file.zsl> [options]
+zevy-alloy <command> <file.zsl> [options]
 ```
+
+Commands:
+
+- `compile`: generate requested shader outputs.
+- `validate`: validate existing generated shader files at the requested output paths.
 
 Available output options:
 
@@ -47,14 +52,26 @@ Available output options:
 - `--out-glsl330 <path>`
 - `--out-glsles <path>` (GLSL ES 300)
 - `--out-msl <path>`
-- `--out-spv <path>` (requires `glslang` or `glslc`)
-- `--out-dxil <path>` (requires `dxc`)
+- `--out-spv <path>`
+- `--out-dxil <path>`
+- `--spirv-env <env>` where `<env>` is `opengl`, `vulkan1.0`, `vulkan1.1`, `vulkan1.2`, `vulkan1.3`, or `vulkan1.4`
+- `--spirv-version <ver>` where `<ver>` is `spv1.0` through `spv1.6`
+- `--dxil-model <model>` where `<model>` is `6.0` through `6.8`
 - `--local-size <x,y,z>` (override compute local size)
 - `--local-size-x <n>`
 - `--local-size-y <n>`
 - `--local-size-z <n>`
 
-If no output flags are provided, zevy-alloy attempts all output formats and writes results next to the source file (formats with missing external compilers such as SPIR-V/DXIL are skipped with diagnostics).
+If no output flags are provided, zevy-alloy uses default output paths next to the source file for all supported formats.
+
+Validation uses backend tools where available:
+
+- GLSL: `glslangValidator`
+- SPIR-V: `spirv-val`
+- HLSL and DXIL: `dxc`
+- MSL: currently checked for file presence/content only, no external validation tool used yet.
+
+Compatibility behavior is strict for versioned targets: if a shader uses features that are incompatible with a requested backend/profile (for example, storage buffers in GLSL 330/ES 300, or standalone uniforms for Vulkan SPIR-V), zevy-alloy fails generation instead of silently emitting partial output.
 
 Compute shaders can also set local size in source with a module-level declaration:
 
@@ -87,3 +104,6 @@ If your editor cannot resolve that module automatically, point it at the local s
 Plain uniforms are now intended to be declared as top-level `pub var` values with an explicit type, for example `pub var time: f32 = 0.0;`. Buffer/sampler/texture resources still use the explicit `zsl.UniformBuffer(...)`, `zsl.StorageBuffer(...)`, `zsl.Texture2D(...)`, and similar wrapper types in the `pub var` annotation. The older `zsl.Uniform(...)` wrapper is still accepted for compatibility, but it is deprecated.
 
 Entry-point input and output struct names are not special. You can name them however you want; `PSInput` and `PSOutput` are just examples used in older shader snippets.
+
+
+

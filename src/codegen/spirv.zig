@@ -4,8 +4,15 @@ const ir = @import("../zsl/ir.zig");
 const iface = @import("interface.zig");
 const glsl_gen = @import("glsl.zig");
 const ext = @import("../external_tools.zig");
+const versions = @import("../versions.zig");
+
+pub const SpirvTargetEnv = versions.SpirvTargetEnv;
+pub const SpirvVersion = versions.SpirvVersion;
 
 pub const SpirvGenerator = struct {
+    target_env: SpirvTargetEnv = .opengl,
+    target_spv: ?SpirvVersion = null,
+
     const vtable = iface.VTable{
         .name = name_fn,
         .fileExtension = ext_fn,
@@ -32,12 +39,25 @@ pub const SpirvGenerator = struct {
         io: std.Io,
         alloc: std.mem.Allocator,
     ) iface.GenerateError!void {
-        _ = ptr;
+        const self: *SpirvGenerator = @ptrCast(@alignCast(ptr));
+
+        // Vulkan SPIR-V does not support standalone scalar/vector uniforms. Require
+        // explicit resource declarations (uniform buffers, textures, samplers, etc.).
+        if (self.target_env.isVulkan()) {
+            for (module.declarations.items) |decl| {
+                if (decl == .resource and decl.resource.kind == .uniform) {
+                    return error.UnsupportedSpirvVulkanStandaloneUniform;
+                }
+            }
+        }
 
         // 1. Generate GLSL 450 source with SPIRV-compatible uniform layout qualifiers.
         var glsl_impl = glsl_gen.GlslGenerator{ .version = .glsl450, .spirv_compat = true };
         const glsl_gen_iface = glsl_impl.generator();
-        const glsl_src = try glsl_gen_iface.generateToSlice(module, io, alloc);
+        const glsl_src = glsl_gen_iface.generateToSlice(module, io, alloc) catch |e| switch (e) {
+            error.Unsupported => return error.UnsupportedSpirvInputFeature,
+            else => return e,
+        };
         defer alloc.free(glsl_src);
 
         // 2. Determine stage extension for glslangValidator.
@@ -79,13 +99,37 @@ pub const SpirvGenerator = struct {
         defer alloc.free(spv_full);
 
         // 4. Invoke glslangValidator or glslc.
-        // Use OpenGL SPIR-V target (-G / --target-env=opengl) so that standalone
-        // `uniform float x;` declarations (valid OpenGL GLSL, invalid Vulkan GLSL)
-        // are accepted.
         const result = blk: {
-            const r = ext.run(io, &.{ "glslangValidator", "-G", "-o", spv_full, glsl_full }) catch |e| {
+            var glslang_args: std.ArrayList([]const u8) = .empty;
+            defer glslang_args.deinit(alloc);
+            glslang_args.appendSlice(alloc, &.{"glslangValidator"}) catch return error.OutOfMemory;
+            if (self.target_env == .opengl) {
+                glslang_args.append(alloc, "-G") catch return error.OutOfMemory;
+            } else {
+                glslang_args.append(alloc, "-V") catch return error.OutOfMemory;
+            }
+            glslang_args.appendSlice(alloc, &.{ "--client", self.target_env.glslangClientArg() }) catch return error.OutOfMemory;
+            if (self.target_spv) |spv| {
+                glslang_args.appendSlice(alloc, &.{ "--target-spv", spv.arg() }) catch return error.OutOfMemory;
+            }
+            glslang_args.appendSlice(alloc, &.{ "-o", spv_full, glsl_full }) catch return error.OutOfMemory;
+
+            const r = ext.run(io, glslang_args.items) catch |e| {
                 if (e == error.NotFound) {
-                    break :blk ext.run(io, &.{ "glslc", "--target-env=opengl", "-o", spv_full, glsl_full }) catch |e2| {
+                    const glslc_target_env = try std.fmt.allocPrint(alloc, "--target-env={s}", .{self.target_env.glslcArg()});
+                    defer alloc.free(glslc_target_env);
+
+                    var glslc_args: std.ArrayList([]const u8) = .empty;
+                    defer glslc_args.deinit(alloc);
+                    glslc_args.appendSlice(alloc, &.{ "glslc", glslc_target_env }) catch return error.OutOfMemory;
+                    if (self.target_spv) |spv| {
+                        const glslc_target_spv = try std.fmt.allocPrint(alloc, "--target-spv={s}", .{spv.arg()});
+                        defer alloc.free(glslc_target_spv);
+                        glslc_args.append(alloc, glslc_target_spv) catch return error.OutOfMemory;
+                    }
+                    glslc_args.appendSlice(alloc, &.{ "-o", spv_full, glsl_full }) catch return error.OutOfMemory;
+
+                    break :blk ext.run(io, glslc_args.items) catch |e2| {
                         if (e2 == error.NotFound) return error.ExternalCompilerNotFound;
                         return error.ExternalCompilerFailed;
                     };
@@ -114,3 +158,9 @@ pub const SpirvGenerator = struct {
         writer.writeAll(spv_data) catch return error.IoError;
     }
 };
+
+test "spirv target env string mapping" {
+    try std.testing.expectEqualStrings("opengl", SpirvTargetEnv.opengl.glslcArg());
+    try std.testing.expectEqualStrings("vulkan1.2", SpirvTargetEnv.vulkan12.glslcArg());
+    try std.testing.expectEqualStrings("vulkan130", SpirvTargetEnv.vulkan13.glslangClientArg());
+}

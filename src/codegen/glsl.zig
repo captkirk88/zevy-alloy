@@ -166,6 +166,11 @@ const GlslEmitter = struct {
         const entry = module.anyEntryPoint();
         const stage = if (entry) |e| e.stage else ir.ShaderStage.unknown;
 
+        if ((stage == .compute) and (self.version != .glsl450)) {
+            // Compute shaders require newer profiles than GLSL 330 and GLSL ES 300.
+            return error.Unsupported;
+        }
+
         if (stage == .compute) {
             const size = module.resolvedComputeLocalSize();
             try self.wfmt("layout(local_size_x = {d}, local_size_y = {d}, local_size_z = {d}) in;\n\n", .{ size.x, size.y, size.z });
@@ -295,8 +300,10 @@ const GlslEmitter = struct {
                     });
                     try self.wfmt("    {s} {s}[];\n", .{ glslTypeName(r.type), r.name });
                     try self.w("};\n");
+                } else {
+                    // Storage buffers are not supported by our GLSL 330 / ES 300 targets.
+                    return error.Unsupported;
                 }
-                // Storage buffers not in GLSL 330 or ES 300 without extensions.
             },
         }
     }

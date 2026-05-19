@@ -1,179 +1,109 @@
 const std = @import("std");
 const zsl = @import("zevy_alloy");
+const cli = @import("cli.zig");
+const ext = zsl.external;
 
-fn parsePositiveU32(arg_name: []const u8, value: []const u8) !u32 {
-    const parsed = std.fmt.parseInt(u32, value, 10) catch return error.InvalidArgument;
-    if (parsed == 0) return error.InvalidArgument;
-    _ = arg_name;
-    return parsed;
-}
-
-fn parseLocalSizeTriplet(value: []const u8) !zsl.ir.ComputeLocalSize {
-    var parts = std.mem.splitScalar(u8, value, ',');
-    const x_txt = parts.next() orelse return error.InvalidArgument;
-    const y_txt = parts.next() orelse return error.InvalidArgument;
-    const z_txt = parts.next() orelse return error.InvalidArgument;
-    if (parts.next() != null) return error.InvalidArgument;
-    return .{
-        .x = try parsePositiveU32("x", std.mem.trim(u8, x_txt, " \t")),
-        .y = try parsePositiveU32("y", std.mem.trim(u8, y_txt, " \t")),
-        .z = try parsePositiveU32("z", std.mem.trim(u8, z_txt, " \t")),
+fn stageToGlslang(stage: zsl.ir.ShaderStage) ?[]const u8 {
+    return switch (stage) {
+        .vertex => "vert",
+        .fragment => "frag",
+        .compute => "comp",
+        .geometry => "geom",
+        .tessellation_control => "tesc",
+        .tessellation_eval => "tese",
+        .unknown => null,
     };
 }
 
-const usage =
-    \\Usage: zevy-alloy compile <file.zsl> [options]
-    \\
-    \\Options:
-    \\  --out-hlsl   <path>   Write HLSL output to path
-    \\  --out-glsl   <path>   Write GLSL 450 output to path
-    \\  --out-glsl330 <path>  Write GLSL 330 output to path
-    \\  --out-glsles <path>   Write GLSL ES 300 output to path
-    \\  --out-msl    <path>   Write MSL output to path
-    \\  --out-spv    <path>   Write SPIR-V output to path (requires glslangValidator or glslc)
-    \\  --out-dxil   <path>   Write DXIL output to path (requires dxc)
-    \\  --local-size <x,y,z>  Override compute local size for GLSL/SPIR-V/DXIL paths
-    \\  --local-size-x <n>    Override compute local size X (>= 1)
-    \\  --local-size-y <n>    Override compute local size Y (>= 1)
-    \\  --local-size-z <n>    Override compute local size Z (>= 1)
-    \\  --help               Show this help
-    \\
-;
+fn stageToDxcPrefix(stage: zsl.ir.ShaderStage) ?[]const u8 {
+    return switch (stage) {
+        .vertex => "vs",
+        .fragment => "ps",
+        .compute => "cs",
+        .geometry => "gs",
+        .tessellation_control => "hs",
+        .tessellation_eval => "ds",
+        .unknown => null,
+    };
+}
 
-pub fn main(init: std.process.Init) !void {
-    const alloc = init.arena.allocator();
-    const args = try init.minimal.args.toSlice(alloc);
-    defer alloc.free(args);
-
-    // Set up stdout/stderr writers with small stack buffers.
-    var stdout_buf: [4096]u8 = undefined;
-    var stderr_buf: [4096]u8 = undefined;
-    var out_w = std.Io.File.stdout().writer(init.io, &stdout_buf);
-    var err_w = std.Io.File.stderr().writer(init.io, &stderr_buf);
-
-    if (args.len < 3) {
-        err_w.interface.writeAll(usage) catch {};
-        try err_w.flush();
-        std.process.exit(1);
-    }
-
-    if (!std.mem.eql(u8, args[1], "compile")) {
-        err_w.interface.print("Unknown command: {s}\n", .{args[1]}) catch {};
-        err_w.interface.writeAll(usage) catch {};
-        try err_w.flush();
-        std.process.exit(1);
-    }
-
-    const input_path = args[2];
-
-    // Parse output paths from remaining args.
-    const OutSpec = struct { kind: []const u8, path: []const u8 };
-    var out_specs: std.ArrayList(OutSpec) = .empty;
-    var local_size_override: ?zsl.ir.ComputeLocalSize = null;
-
-    var i: usize = 3;
-    while (i < args.len) : (i += 1) {
-        const flag = args[i];
-        if (std.mem.eql(u8, flag, "--help")) {
-            out_w.interface.writeAll(usage) catch {};
-            try out_w.flush();
-            return;
-        }
-
-        if (std.mem.eql(u8, flag, "--local-size")) {
-            i += 1;
-            if (i >= args.len) {
-                err_w.interface.print("Missing value for {s}\n", .{flag}) catch {};
-                try err_w.flush();
-                std.process.exit(1);
-            }
-            local_size_override = parseLocalSizeTriplet(args[i]) catch {
-                err_w.interface.print("Invalid value for --local-size: '{s}' (expected x,y,z with each >= 1)\n", .{args[i]}) catch {};
-                try err_w.flush();
-                std.process.exit(1);
-            };
-            continue;
-        }
-
-        if (std.mem.eql(u8, flag, "--local-size-x") or std.mem.eql(u8, flag, "--local-size-y") or std.mem.eql(u8, flag, "--local-size-z")) {
-            i += 1;
-            if (i >= args.len) {
-                err_w.interface.print("Missing value for {s}\n", .{flag}) catch {};
-                try err_w.flush();
-                std.process.exit(1);
-            }
-            const v = parsePositiveU32(flag, args[i]) catch {
-                err_w.interface.print("Invalid value for {s}: '{s}' (expected integer >= 1)\n", .{ flag, args[i] }) catch {};
-                try err_w.flush();
-                std.process.exit(1);
-            };
-            if (local_size_override == null) local_size_override = .{};
-            if (std.mem.eql(u8, flag, "--local-size-x")) local_size_override.?.x = v;
-            if (std.mem.eql(u8, flag, "--local-size-y")) local_size_override.?.y = v;
-            if (std.mem.eql(u8, flag, "--local-size-z")) local_size_override.?.z = v;
-            continue;
-        }
-
-        var matched = false;
-        inline for (std.meta.fields(zsl.ShaderFormat)) |f| {
-            const fmt: zsl.ShaderFormat = @enumFromInt(f.value);
-            if (std.mem.eql(u8, flag, fmt.flag())) {
-                i += 1;
-                if (i >= args.len) {
-                    err_w.interface.print("Missing path for {s}\n", .{flag}) catch {};
-                    try err_w.flush();
-                    std.process.exit(1);
-                }
-                out_specs.append(alloc, .{ .kind = fmt.kind(), .path = args[i] }) catch @panic("OOM");
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) {
-            err_w.interface.print("Unknown flag: {s}\n", .{flag}) catch {};
-            err_w.interface.writeAll(usage) catch {};
-            try err_w.flush();
-            std.process.exit(1);
-        }
-    }
-
-    // Read input file.
+fn readSourceAndAbsPath(
+    init: std.process.Init,
+    alloc: std.mem.Allocator,
+    input_path: []const u8,
+    err_w: *std.Io.Writer,
+) !struct { source: []u8, abs_path: []const u8 } {
     const source = std.Io.Dir.cwd().readFileAlloc(init.io, input_path, alloc, .limited(4 * 1024 * 1024)) catch |e| {
-        err_w.interface.print("Cannot read '{s}': {s}\n", .{ input_path, @errorName(e) }) catch {};
-        try err_w.flush();
-        std.process.exit(1);
+        err_w.print("Cannot read '{s}': {s}\n", .{ input_path, @errorName(e) }) catch {};
+        return error.InvalidArgument;
     };
-
-    // Resolve canonical input path.
     const abs_path = std.Io.Dir.cwd().realPathFileAlloc(init.io, input_path, alloc) catch input_path;
+    return .{ .source = source, .abs_path = abs_path };
+}
 
-    // If no output flags were given, default to all formats beside the input file.
-    if (out_specs.items.len == 0) {
-        const stem = std.fs.path.stem(input_path);
-        const dir = std.fs.path.dirname(input_path) orelse ".";
-        const defaults = [_]struct { kind: []const u8, suffix: []const u8, ext: []const u8 }{
-            .{ .kind = "hlsl", .suffix = "", .ext = "hlsl" },
-            .{ .kind = "glsl450", .suffix = "", .ext = "glsl" },
-            .{ .kind = "glsl330", .suffix = ".330", .ext = "glsl" },
-            .{ .kind = "glsles300", .suffix = ".es", .ext = "glsl" },
-            .{ .kind = "msl", .suffix = "", .ext = "metal" },
-            .{ .kind = "spirv", .suffix = "", .ext = "spv" },
-            .{ .kind = "dxil", .suffix = "", .ext = "dxil" },
-        };
-        for (defaults) |d| {
-            const path = try std.fmt.allocPrint(alloc, "{s}/{s}{s}.{s}", .{ dir, stem, d.suffix, d.ext });
-            out_specs.append(alloc, .{ .kind = d.kind, .path = path }) catch @panic("OOM");
+fn parseStage(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    source: []const u8,
+    abs_path: []const u8,
+    err_w: *std.Io.Writer,
+) !zsl.ir.ShaderStage {
+    var errors = zsl.ErrorList.init(alloc);
+    defer errors.deinit();
+
+    var resolver = zsl.ImportResolver.init(io, alloc);
+    defer resolver.deinit();
+
+    var builtins = try zsl.stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+
+    var module = zsl.ir.Module.init(alloc, abs_path);
+    defer module.deinit();
+
+    zsl.parse(source, abs_path, &module, &errors, &resolver, &builtins) catch {};
+
+    var import_idx: usize = 0;
+    while (import_idx < module.imported_paths.items.len) : (import_idx += 1) {
+        const imp_path = module.imported_paths.items[import_idx];
+        if (resolver.check(imp_path) != null) continue;
+        if (std.Io.Dir.cwd().readFileAlloc(io, imp_path, alloc, .limited(1 * 1024 * 1024))) |imp_source| {
+            defer alloc.free(imp_source);
+            zsl.parse(imp_source, imp_path, &module, &errors, &resolver, &builtins) catch {};
+        } else |_| {
+            errors.addError(imp_path, 0, 0, "cannot read imported ZSL module", null) catch {};
         }
     }
 
-    // Build generators list.
-    var hlsl_impl = zsl.HlslGenerator{};
-    var glsl450_impl = zsl.GlslGenerator{ .version = .glsl450 };
-    var glsl330_impl = zsl.GlslGenerator{ .version = .glsl330 };
-    var glsles_impl = zsl.GlslGenerator{ .version = .es300 };
-    var msl_impl = zsl.MslGenerator{};
-    var spirv_impl = zsl.SpirvGenerator{};
-    var dxil_impl = zsl.DxilGenerator{};
+    if (errors.count() > 0) {
+        errors.printAll(err_w) catch {};
+        return error.InvalidArgument;
+    }
+
+    if (module.anyEntryPoint()) |entry| return entry.stage;
+    return .unknown;
+}
+
+fn selectGenerators(
+    alloc: std.mem.Allocator,
+    out_specs: []const cli.OutSpec,
+    spirv_target_env: zsl.SpirvTargetEnv,
+    spirv_target_spv: ?zsl.SpirvVersion,
+    dxil_shader_model: zsl.DxilShaderModel,
+) !std.ArrayList(zsl.Generator) {
+    const hlsl_impl = try alloc.create(zsl.HlslGenerator);
+    hlsl_impl.* = .{};
+    const glsl450_impl = try alloc.create(zsl.GlslGenerator);
+    glsl450_impl.* = .{ .version = .glsl450 };
+    const glsl330_impl = try alloc.create(zsl.GlslGenerator);
+    glsl330_impl.* = .{ .version = .glsl330 };
+    const glsles_impl = try alloc.create(zsl.GlslGenerator);
+    glsles_impl.* = .{ .version = .es300 };
+    const msl_impl = try alloc.create(zsl.MslGenerator);
+    msl_impl.* = .{};
+    const spirv_impl = try alloc.create(zsl.SpirvGenerator);
+    spirv_impl.* = .{ .target_env = spirv_target_env, .target_spv = spirv_target_spv };
+    const dxil_impl = try alloc.create(zsl.DxilGenerator);
+    dxil_impl.* = .{ .shader_model = dxil_shader_model };
 
     const all_generators = [_]zsl.Generator{
         hlsl_impl.generator(),
@@ -185,52 +115,161 @@ pub fn main(init: std.process.Init) !void {
         dxil_impl.generator(),
     };
 
-    // Filter to only generators that were requested.
     var requested_gens: std.ArrayList(zsl.Generator) = .empty;
-    for (out_specs.items) |spec| {
+    for (out_specs) |spec| {
         for (all_generators) |gen| {
             if (std.mem.eql(u8, gen.name(), spec.kind)) {
-                requested_gens.append(alloc, gen) catch @panic("OOM");
+                requested_gens.append(alloc, gen) catch return error.OutOfMemory;
                 break;
             }
         }
     }
 
-    // Compile.
-    var result = try zsl.compile(init.io, alloc, source, abs_path, requested_gens.items, .{
-        .compute_local_size_override = local_size_override,
+    return requested_gens;
+}
+
+fn runTool(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    argv: []const []const u8,
+    label: []const u8,
+    err_w: *std.Io.Writer,
+) bool {
+    var res = ext.run(io, argv) catch |e| {
+        if (e == error.NotFound) {
+            err_w.print("Validation failed for {s}: required tool '{s}' not found on PATH\n", .{ label, argv[0] }) catch {};
+        } else {
+            err_w.print("Validation failed for {s}: cannot run '{s}' ({s})\n", .{ label, argv[0], @errorName(e) }) catch {};
+        }
+        return false;
+    };
+    defer res.deinit();
+
+    if (res.exit_code != 0) {
+        const stderr = res.stderr.readAlloc(alloc, res.stderr.end) catch "";
+        defer if (stderr.len > 0) alloc.free(stderr);
+        if (stderr.len > 0) {
+            err_w.print("Validation failed for {s}:\n{s}\n", .{ label, stderr }) catch {};
+        } else {
+            err_w.print("Validation failed for {s}: tool exited with code {d}\n", .{ label, res.exit_code }) catch {};
+        }
+        return false;
+    }
+
+    return true;
+}
+
+fn validateOne(
+    init: std.process.Init,
+    alloc: std.mem.Allocator,
+    spec: cli.OutSpec,
+    stage: zsl.ir.ShaderStage,
+    dxil_model: zsl.DxilShaderModel,
+    out_w: *std.Io.Writer,
+    err_w: *std.Io.Writer,
+) bool {
+    const file_data = std.Io.Dir.cwd().readFileAlloc(init.io, spec.path, alloc, .limited(64 * 1024 * 1024)) catch |e| {
+        err_w.print("Validation failed for {s}: cannot read file ({s})\n", .{ spec.path, @errorName(e) }) catch {};
+        return false;
+    };
+    defer alloc.free(file_data);
+
+    if (file_data.len == 0) {
+        err_w.print("Validation failed for {s}: file is empty\n", .{spec.path}) catch {};
+        return false;
+    }
+
+    if (std.mem.eql(u8, spec.kind, "glsl450") or std.mem.eql(u8, spec.kind, "glsl330") or std.mem.eql(u8, spec.kind, "glsles300")) {
+        const glsl_stage = stageToGlslang(stage) orelse {
+            err_w.print("Validation failed for {s}: cannot infer shader stage from source\n", .{spec.path}) catch {};
+            return false;
+        };
+        if (!runTool(init.io, alloc, &.{ "glslangValidator", "-S", glsl_stage, spec.path }, spec.path, err_w)) return false;
+        out_w.print("Validated {s}: {s}\n", .{ spec.kind, spec.path }) catch {};
+        return true;
+    }
+
+    if (std.mem.eql(u8, spec.kind, "spirv")) {
+        if (!runTool(init.io, alloc, &.{ "spirv-val", spec.path }, spec.path, err_w)) return false;
+        out_w.print("Validated {s}: {s}\n", .{ spec.kind, spec.path }) catch {};
+        return true;
+    }
+
+    if (std.mem.eql(u8, spec.kind, "hlsl")) {
+        const dxc_stage = stageToDxcPrefix(stage) orelse {
+            err_w.print("Validation failed for {s}: cannot infer shader stage from source\n", .{spec.path}) catch {};
+            return false;
+        };
+        const profile = std.fmt.allocPrint(alloc, "{s}_{s}", .{ dxc_stage, dxil_model.suffix() }) catch return false;
+        defer alloc.free(profile);
+        const tmp_out = std.fmt.allocPrint(alloc, "{s}.validate.dxil", .{spec.path}) catch return false;
+        defer alloc.free(tmp_out);
+        defer std.Io.Dir.cwd().deleteFile(init.io, tmp_out) catch {};
+
+        if (!runTool(init.io, alloc, &.{ "dxc", "-T", profile, "-E", "main", "-Fo", tmp_out, spec.path }, spec.path, err_w)) return false;
+        out_w.print("Validated {s}: {s}\n", .{ spec.kind, spec.path }) catch {};
+        return true;
+    }
+
+    if (std.mem.eql(u8, spec.kind, "dxil")) {
+        if (!runTool(init.io, alloc, &.{ "dxc", "-dumpbin", spec.path }, spec.path, err_w)) return false;
+        out_w.print("Validated {s}: {s}\n", .{ spec.kind, spec.path }) catch {};
+        return true;
+    }
+
+    if (std.mem.eql(u8, spec.kind, "msl")) {
+        out_w.print("Validation skipped for {s}: no cross-platform standalone MSL validator configured\n", .{spec.path}) catch {};
+        return true;
+    }
+
+    err_w.print("Validation failed for {s}: unknown shader kind '{s}'\n", .{ spec.path, spec.kind }) catch {};
+    return false;
+}
+
+fn commandCompile(init: std.process.Init, parsed: cli.Parsed, out_w: *std.Io.Writer, err_w: *std.Io.Writer) !void {
+    const alloc = init.arena.allocator();
+    const source_and_path = try readSourceAndAbsPath(init, alloc, parsed.input_path, err_w);
+
+    var requested_gens = try selectGenerators(
+        alloc,
+        parsed.out_specs.items,
+        parsed.spirv_target_env,
+        parsed.spirv_target_spv,
+        parsed.dxil_shader_model,
+    );
+    defer requested_gens.deinit(alloc);
+
+    var result = try zsl.compile(init.io, alloc, source_and_path.source, source_and_path.abs_path, requested_gens.items, .{
+        .compute_local_size_override = parsed.local_size_override,
     });
     defer result.deinit();
 
-    // Print diagnostics.
     if (result.hasErrors()) {
-        result.printDiagnostics(&err_w.interface) catch {};
-        std.process.exit(1);
+        result.printDiagnostics(err_w) catch {};
+        return error.InvalidArgument;
     }
 
-    // Write outputs.
     var had_error = false;
     for (result.outputs, 0..) |output, idx| {
-        const spec = out_specs.items[idx];
+        const spec = parsed.out_specs.items[idx];
         if (output.content) |content| {
-            // Create parent directories if needed.
             if (std.fs.path.dirname(spec.path)) |parent| {
                 std.Io.Dir.cwd().createDirPath(init.io, parent) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => {
-                        err_w.interface.print("Cannot create dir '{s}': {s}\n", .{ parent, @errorName(e) }) catch {};
+                        err_w.print("Cannot create dir '{s}': {s}\n", .{ parent, @errorName(e) }) catch {};
                         had_error = true;
                         continue;
                     },
                 };
             }
             std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = spec.path, .data = content }) catch |e| {
-                err_w.interface.print("Cannot write '{s}': {s}\n", .{ spec.path, @errorName(e) }) catch {};
+                err_w.print("Cannot write '{s}': {s}\n", .{ spec.path, @errorName(e) }) catch {};
                 had_error = true;
             };
-            out_w.interface.print("Wrote {s}: {s} ({d} bytes)\n", .{ output.name, spec.path, content.len }) catch {};
+            out_w.print("Wrote {s}: {s} ({d} bytes)\n", .{ output.name, spec.path, content.len }) catch {};
         } else if (output.err_message) |msg| {
-            err_w.interface.print("{s} generator failed: {s}\n", .{ output.name, msg }) catch {};
+            err_w.print("{s} generator failed: {s}\n", .{ output.name, msg }) catch {};
             if (!std.mem.eql(u8, msg, "ExternalCompilerNotFound") and
                 !std.mem.eql(u8, msg, "ExternalCompilerFailed"))
             {
@@ -239,10 +278,60 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (had_error) {
+    if (had_error) return error.InvalidArgument;
+}
+
+fn commandValidate(init: std.process.Init, parsed: cli.Parsed, out_w: *std.Io.Writer, err_w: *std.Io.Writer) !void {
+    const alloc = init.arena.allocator();
+    const source_and_path = try readSourceAndAbsPath(init, alloc, parsed.input_path, err_w);
+
+    const stage = try parseStage(init.io, alloc, source_and_path.source, source_and_path.abs_path, err_w);
+
+    var had_error = false;
+    for (parsed.out_specs.items) |spec| {
+        if (!validateOne(init, alloc, spec, stage, parsed.dxil_shader_model, out_w, err_w)) {
+            had_error = true;
+        }
+    }
+
+    if (had_error) return error.InvalidArgument;
+}
+
+pub fn main(init: std.process.Init) !void {
+    const alloc = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(alloc);
+    defer alloc.free(args);
+
+    var stdout_buf: [4096]u8 = undefined;
+    var stderr_buf: [4096]u8 = undefined;
+    var out_w = std.Io.File.stdout().writer(init.io, &stdout_buf);
+    var err_w = std.Io.File.stderr().writer(init.io, &stderr_buf);
+
+    const parsed = cli.parseArgs(args, alloc) catch |e| {
+        switch (e) {
+            error.HelpRequested => {
+                out_w.interface.writeAll(cli.usage) catch {};
+                try out_w.flush();
+                return;
+            },
+            else => {
+                err_w.interface.writeAll(cli.usage) catch {};
+                try err_w.flush();
+                std.process.exit(1);
+            },
+        }
+    };
+
+    const result = switch (parsed.command) {
+        .compile => commandCompile(init, parsed, &out_w.interface, &err_w.interface),
+        .validate => commandValidate(init, parsed, &out_w.interface, &err_w.interface),
+    };
+
+    if (result) |_| {
+        try out_w.flush();
+    } else |_| {
         try out_w.flush();
         try err_w.flush();
         std.process.exit(1);
     }
-    try out_w.flush();
 }

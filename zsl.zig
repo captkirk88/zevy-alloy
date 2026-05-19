@@ -9,8 +9,17 @@
 
 // ── Binding options ───────────────────────────────────────────────────────────
 
+/// Binding slot and space options for shader resources.
+/// Used to configure the descriptor binding location for resources like buffers,
+/// textures, and samplers in shader stages.
+///
+/// Fields:
+///   - binding: The binding slot index within the descriptor set space (default: 0)
+///   - space: The descriptor set space/layout index (default: 0)
 pub const BindingOpts = struct {
+    /// Binding slot index within the descriptor set space
     binding: u32 = 0,
+    /// Descriptor set space/layout index
     space: u32 = 0,
 };
 

@@ -4,8 +4,13 @@ const ir = @import("../zsl/ir.zig");
 const iface = @import("interface.zig");
 const hlsl_gen = @import("hlsl.zig");
 const ext = @import("../external_tools.zig");
+const versions = @import("../versions.zig");
+
+pub const DxilShaderModel = versions.DxilShaderModel;
 
 pub const DxilGenerator = struct {
+    shader_model: DxilShaderModel = .sm60,
+
     const vtable = iface.VTable{
         .name = name_fn,
         .fileExtension = ext_fn,
@@ -32,7 +37,7 @@ pub const DxilGenerator = struct {
         io: std.Io,
         alloc: std.mem.Allocator,
     ) iface.GenerateError!void {
-        _ = ptr;
+        const self: *DxilGenerator = @ptrCast(@alignCast(ptr));
 
         // 1. Generate HLSL source.
         var hlsl_impl = hlsl_gen.HlslGenerator{};
@@ -42,15 +47,19 @@ pub const DxilGenerator = struct {
 
         // 2. Determine DXC profile from entry point stage.
         const entry = module.anyEntryPoint();
-        const profile: []const u8 = if (entry) |e| switch (e.stage) {
-            .vertex => "vs_6_0",
-            .fragment => "ps_6_0",
-            .compute => "cs_6_0",
-            .geometry => "gs_6_0",
-            .tessellation_control => "hs_6_0",
-            .tessellation_eval => "ds_6_0",
-            .unknown => "lib_6_3",
-        } else "lib_6_3";
+        const profile = if (entry) |e| blk: {
+            const prefix = switch (e.stage) {
+                .vertex => "vs",
+                .fragment => "ps",
+                .compute => "cs",
+                .geometry => "gs",
+                .tessellation_control => "hs",
+                .tessellation_eval => "ds",
+                .unknown => "lib",
+            };
+            break :blk std.fmt.allocPrint(alloc, "{s}_{s}", .{ prefix, self.shader_model.suffix() }) catch return error.OutOfMemory;
+        } else std.fmt.allocPrint(alloc, "lib_{s}", .{self.shader_model.suffix()}) catch return error.OutOfMemory;
+        defer alloc.free(profile);
 
         // 3. Write HLSL to a temp file.
         const src_dir = std.fs.path.dirname(module.path) orelse ".";
@@ -98,3 +107,8 @@ pub const DxilGenerator = struct {
         writer.writeAll(dxil_data) catch return error.IoError;
     }
 };
+
+test "dxil shader model suffix" {
+    try std.testing.expectEqualStrings("6_0", DxilShaderModel.sm60.suffix());
+    try std.testing.expectEqualStrings("6_8", DxilShaderModel.sm68.suffix());
+}

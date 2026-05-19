@@ -1,34 +1,11 @@
 const std = @import("std");
 const buildtools = @import("zevy_buildtools");
+const versions = @import("src/versions.zig");
 
-pub const ShaderFormat = enum {
-    /// DirectX HLSL (shader model 6.0+)
-    hlsl,
-    /// GLSL 4.50 core profile (desktop OpenGL, Vulkan, etc.)
-    glsl450,
-    /// GLSL ES 3.00 (mobile OpenGL ES, WebGL 2)
-    glsl330,
-    /// GLSL ES 3.00 (mobile OpenGL ES, WebGL 2), with extra restrictions for better compatibility with shader translators like SPIRV-Cross. Recommended for maximum portability when targeting multiple platforms.
-    glsles300,
-    /// Metal Shading Language (Apple platforms)
-    msl,
-    /// SPIR-V binary format (Vulkan, OpenGL with GL_ARB_gl_spirv extension, DirectX with SPIRV-Cross, etc.)
-    spirv,
-    /// DirectX Shader Intermediate Language (DXIL) for shader model 6.0+. Supported natively on Windows 10+ with Direct3D 12, and on other platforms via shader translators like SPIRV-Cross.
-    dxil,
-
-    pub fn flag(self: ShaderFormat) []const u8 {
-        return switch (self) {
-            .hlsl => "--out-hlsl",
-            .glsl450 => "--out-glsl",
-            .glsl330 => "--out-glsl330",
-            .glsles300 => "--out-glsles",
-            .msl => "--out-msl",
-            .spirv => "--out-spv",
-            .dxil => "--out-dxil",
-        };
-    }
-};
+pub const ShaderFormat = versions.ShaderFormat;
+pub const SpirvTargetEnv = versions.SpirvTargetEnv;
+pub const SpirvVersion = versions.SpirvVersion;
+pub const DxilShaderModel = versions.DxilShaderModel;
 
 pub const ShaderOutput = struct {
     format: ShaderFormat,
@@ -38,6 +15,12 @@ pub const ShaderOutput = struct {
 pub const ShaderJob = struct {
     zsl: []const u8,
     outputs: []const ShaderOutput,
+    /// Optional SPIR-V target environment passed as --spirv-env.
+    spirv_env: ?SpirvTargetEnv = null,
+    /// Optional SPIR-V version passed as --spirv-version.
+    spirv_version: ?SpirvVersion = null,
+    /// Optional DXIL shader model passed as --dxil-model.
+    dxil_model: ?DxilShaderModel = null,
 };
 
 /// Compile `.zsl` shader files using the zevy-alloy compiler executable.
@@ -51,6 +34,10 @@ pub const ShaderJob = struct {
 ///     .{ .zsl = "assets/my.zsl", .outputs = &.{
 ///         .{ .format = .glsles300, .path = "assets/my.es.frag.glsl" },
 ///     }},
+///     .{ .zsl = "assets/my_compute.zsl", .outputs = &.{
+///         .{ .format = .spirv, .path = "assets/my_compute.vk.spv" },
+///         .{ .format = .dxil, .path = "assets/my_compute.dxil" },
+///     }, .spirv_env = .vulkan12, .spirv_version = .spv15, .dxil_model = .sm66 },
 /// });
 /// ```
 pub fn compileShaders(
@@ -72,6 +59,15 @@ pub fn compileShaders(
 
         const cmd = b.addRunArtifact(compiler);
         cmd.addArgs(&.{ "compile", job.zsl });
+        if (job.spirv_env) |env| {
+            cmd.addArgs(&.{ "--spirv-env", env.cliValue() });
+        }
+        if (job.spirv_version) |version| {
+            cmd.addArgs(&.{ "--spirv-version", version.cliValue() });
+        }
+        if (job.dxil_model) |model| {
+            cmd.addArgs(&.{ "--dxil-model", model.cliValue() });
+        }
         for (job.outputs) |out| {
             cmd.addArgs(&.{ out.format.flag(), out.path });
         }
@@ -150,6 +146,8 @@ pub fn build(b: *std.Build) !void {
                 .{ .format = .spirv, .path = "examples/circle_color.spv" },
                 .{ .format = .dxil, .path = "examples/circle_color.dxil" },
             },
+            .spirv_env = .opengl,
+            .dxil_model = .sm68,
         },
         .{
             .zsl = "examples/factorial.zsl",

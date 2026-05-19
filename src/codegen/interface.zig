@@ -5,6 +5,8 @@ const ir = @import("../zsl/ir.zig");
 pub const GenerateError = error{
     OutOfMemory,
     Unsupported,
+    UnsupportedSpirvVulkanStandaloneUniform,
+    UnsupportedSpirvInputFeature,
     IoError,
     ExternalCompilerNotFound,
     ExternalCompilerFailed,

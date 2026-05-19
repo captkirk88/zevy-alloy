@@ -51,10 +51,18 @@ pub const CompileResult = struct {
 
 pub const CompileOptions = struct {
     /// If true, continue generating even if some generators fail.
-    continue_on_generator_error: bool = true,
+    continue_on_generator_error: bool = false,
     /// Optional compile-time override for compute shader local size.
     compute_local_size_override: ?ir.ComputeLocalSize = null,
 };
+
+fn generatorErrorMessage(e: iface.GenerateError) []const u8 {
+    return switch (e) {
+        error.UnsupportedSpirvVulkanStandaloneUniform => "Vulkan SPIR-V does not allow standalone uniforms; use a uniform buffer",
+        error.UnsupportedSpirvInputFeature => "shader uses features incompatible with requested SPIR-V/profile target",
+        else => @errorName(e),
+    };
+}
 
 /// Parse a .zsl source and run all provided generators.
 /// Returns a `CompileResult` which the caller must deinit.
@@ -123,7 +131,7 @@ pub fn compile(
         }
 
         const content = gen.generateToSlice(&module, io, alloc) catch |e| {
-            outputs[i].err_message = @errorName(e);
+            outputs[i].err_message = generatorErrorMessage(e);
             continue;
         };
         outputs[i].content = content;
