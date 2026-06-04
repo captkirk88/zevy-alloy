@@ -6,7 +6,7 @@
 
 zevy-alloy is a ZSL shader compiler and build integration library for Zig projects.
 It compiles `.zsl` shader sources to multiple targets, including GLSL 450, GLSL 330,
-GLSL ES 300, HLSL, Metal, SPIR-V, and DXIL.
+GLSL ES 300, HLSL, Metal, WGSL, SPIR-V, and DXIL.
 
 ## Purpose
 
@@ -52,6 +52,7 @@ Available output options:
 - `--out-glsl330 <path>`
 - `--out-glsles <path>` (GLSL ES 300)
 - `--out-msl <path>`
+- `--out-wgsl <path>`
 - `--out-spv <path>`
 - `--out-dxil <path>`
 - `--spirv-env <env>` where `<env>` is `opengl`, `vulkan1.0`, `vulkan1.1`, `vulkan1.2`, `vulkan1.3`, or `vulkan1.4`
@@ -69,7 +70,11 @@ Validation uses backend tools where available:
 - GLSL: `glslangValidator`
 - SPIR-V: `spirv-val`
 - HLSL and DXIL: `dxc`
+- WGSL: currently checked for file presence/content only, no external validation tool used yet.
 - MSL: currently checked for file presence/content only, no external validation tool used yet.
+
+WGSL generation uses `spirv-cross` (`spirv-cross --wgsl ...`) under the hood.
+If `spirv-cross` is not available on PATH, WGSL output requests are reported and skipped.
 
 Compatibility behavior is strict for versioned targets: if a shader uses features that are incompatible with a requested backend/profile (for example, storage buffers in GLSL 330/ES 300, or standalone uniforms for Vulkan SPIR-V), zevy-alloy fails generation instead of silently emitting partial output.
 
@@ -90,6 +95,16 @@ Precedence is deterministic: CLI override flags win over source `compute` option
 ## Examples
 
 See [examples/](examples/) for sample shaders and usage patterns.
+
+### App-based circles example (zevy_raylib integration)
+
+The [examples/circles.zig](examples/circles.zig) sample now uses `app.run()` and staged systems instead of a manual game loop.
+
+Run it with:
+
+```bash
+zig build circles --release=fast
+```
 
 ## ZLS and IntelliSense
 

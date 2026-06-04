@@ -418,6 +418,46 @@ test "Stage.compute entry point emits compute qualifier" {
     try h.expectMsl("kernel ");
 }
 
+test "circle fragment shader feature set compiles across text backends" {
+    const src =
+        \\const zsl = @import("zsl");
+        \\const sin = zsl.sin;
+        \\const abs = zsl.abs;
+        \\pub var time: f32 = 0.0;
+        \\const CircleInput = struct {
+        \\    /// zsl.SVPosition
+        \\    v_pos: zsl.Vec4,
+        \\    /// zsl.Color(0)
+        \\    v_color: zsl.Vec4,
+        \\    /// zsl.TexCoord(0)
+        \\    v_uv: zsl.Vec2,
+        \\};
+        \\const CircleOutput = struct {
+        \\    /// zsl.SVTarget
+        \\    o_color: zsl.Vec4,
+        \\};
+        \\pub fn main(_: zsl.Stage.fragment, input: CircleInput) CircleOutput {
+        \\    const tau: f32 = 6.2831853;
+        \\    const r: f32 = abs(sin(tau * input.v_color.x + time));
+        \\    const g: f32 = abs(sin(tau * input.v_color.y + time + tau / 3.0));
+        \\    const b: f32 = abs(sin(tau * input.v_color.z + time + tau * 2.0 / 3.0));
+        \\    var output: CircleOutput = undefined;
+        \\    output.o_color = zsl.Vec4{ r, g, b, 1.0 };
+        \\    return output;
+        \\}
+    ;
+
+    var h = try ShaderHarness.init(src, std.testing.allocator);
+    defer h.deinit();
+
+    try h.expectGlsl("uniform float time");
+    try h.expectGlsl("layout(location = 1) in vec4 v_color");
+    try h.expectHlsl("float time");
+    try h.expectHlsl("COLOR0");
+    try h.expectMsl("constant float& time");
+    try h.expectMsl("[[user(color0)]]");
+}
+
 // ── Resource wrappers ─────────────────────────────────────────────────────────
 
 test "Uniform resource emits uniform declaration" {

@@ -13,30 +13,28 @@ pub var time: f32 = 0.0;
 // ── I/O structs ───────────────────────────────────────────────────────────────
 
 const CircleInput = struct {
-    /// zsl.SVPosition
-    v_pos: zsl.Vec4,
-    /// zsl.Color(0)
-    v_color: zsl.Vec4,
     /// zsl.TexCoord(0)
-    v_uv: zsl.Vec2,
+    fragTexCoord: zsl.Vec2,
+    /// zsl.Color(0)
+    fragColor: zsl.Vec4,
 };
 
 const CircleOutput = struct {
     /// zsl.SVTarget
-    o_color: zsl.Vec4,
+    finalColor: zsl.Vec4,
 };
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn main(_: zsl.Stage.fragment, input: CircleInput) CircleOutput {
     const tau: f32 = 6.2831853;
-    // v_color.xyz carries the entity's spawn color (0.0–1.0).  Each channel
+    // fragColor.xyz carries the entity's spawn color (0.0–1.0).  Each channel
     // becomes an independent phase offset so circles with different colors
     // animate differently even when `time` is identical.
-    const r: f32 = abs(sin(tau * input.v_color.x + time));
-    const g: f32 = abs(sin(tau * input.v_color.y + time + tau / 3.0));
-    const b: f32 = abs(sin(tau * input.v_color.z + time + tau * 2.0 / 3.0));
+    const r: f32 = abs(sin(tau * input.fragColor.x + time));
+    const g: f32 = abs(sin(tau * input.fragColor.y + time + tau / 3.0));
+    const b: f32 = abs(sin(tau * input.fragColor.z + time + tau * 2.0 / 3.0));
     var output: CircleOutput = undefined;
-    output.o_color = zsl.Vec4{ r, g, b, 1.0 };
+    output.finalColor = zsl.Vec4{ r, g, b, 1.0 };
     return output;
 }

@@ -4,6 +4,7 @@ pub const ShaderFormat = enum {
     glsl330,
     glsles300,
     msl,
+    wgsl,
     spirv,
     dxil,
 
@@ -14,6 +15,7 @@ pub const ShaderFormat = enum {
             .glsl330 => "--out-glsl330",
             .glsles300 => "--out-glsles",
             .msl => "--out-msl",
+            .wgsl => "--out-wgsl",
             .spirv => "--out-spv",
             .dxil => "--out-dxil",
         };
@@ -26,6 +28,7 @@ pub const ShaderFormat = enum {
             .glsl330 => "glsl330",
             .glsles300 => "glsles300",
             .msl => "msl",
+            .wgsl => "wgsl",
             .spirv => "spirv",
             .dxil => "dxil",
         };

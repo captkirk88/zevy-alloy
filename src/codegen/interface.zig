@@ -8,7 +8,9 @@ pub const GenerateError = error{
     UnsupportedSpirvVulkanStandaloneUniform,
     UnsupportedSpirvInputFeature,
     IoError,
-    ExternalCompilerNotFound,
+    External_DXC_CompilerNotFound,
+    External_GLSLANG_CompilerNotFound,
+    External_SPIRV_CROSS_CompilerNotFound,
     ExternalCompilerFailed,
 };
 

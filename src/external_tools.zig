@@ -3,8 +3,8 @@ const std = @import("std");
 
 pub const ExitResult = struct {
     exit_code: u32,
-    stdout: std.Io.Reader,
-    stderr: std.Io.Reader,
+    stdout: []const u8,
+    stderr: []const u8,
 
     pub fn deinit(self: *ExitResult) void {
         _ = self;
@@ -20,9 +20,11 @@ pub const RunError = error{
 
 /// Check if a program is available on PATH.
 pub fn detect(io: std.Io, name: []const u8) bool {
-    var child = std.process.spawn(io, .{ .argv = &.{ name, "--version" } }) catch return false;
-    child.stout = null;
-    child.stderr = null;
+    var child = std.process.spawn(io, .{
+        .argv = &.{ name, "--version" },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return false;
     _ = child.wait(io) catch return false;
     return true;
 }
@@ -33,7 +35,7 @@ pub fn run(io: std.Io, argv: []const []const u8) RunError!ExitResult {
     var child = std.process.spawn(io, .{
         .argv = argv,
         .stdout = .ignore,
-        .stderr = .pipe,
+        .stderr = .inherit,
     }) catch |e| switch (e) {
         error.AccessDenied,
         error.BadPathName,
@@ -44,16 +46,11 @@ pub fn run(io: std.Io, argv: []const []const u8) RunError!ExitResult {
         else => return RunError.SpawnFailed,
     };
 
-    const max_output = 1024 * 1024; // 1 MB cap
-    var buf: [max_output]u8 = undefined;
-    const stdout_reader = if (child.stdout) |stdout| stdout.reader(io, &buf).interface else std.Io.Reader.fixed(&.{}) ;
-    const stderr_reader = if (child.stderr) |stderr| stderr.reader(io, &buf).interface else std.Io.Reader.fixed(&.{}) ;
-
     const term = child.wait(io) catch return error.IoError;
     const code: u32 = switch (term) {
         .exited => |c| c,
         else => 1,
     };
 
-    return .{ .exit_code = code, .stdout = stdout_reader, .stderr = stderr_reader };
+    return .{ .exit_code = code, .stdout = "", .stderr = "" };
 }

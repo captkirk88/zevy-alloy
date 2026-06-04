@@ -1,4 +1,5 @@
 ## What to do...
 
-- [ ] WGSL support... Maybe later, but it would be nice to have a shader language that is more widely supported across platforms.
-- [ ] More examples and documentation. The current documentation is pretty sparse, and it would be great to have more examples and explanations of how to use the library.
+- [x] WGSL support added via `--out-wgsl` and `ShaderFormat.wgsl`, backed by `spirv-cross` translation.
+- [x] Added semantic regression coverage for the circles shader feature set used with zevy_raylib.
+- [x] Expanded documentation for WGSL output and the App-based circles example workflow.

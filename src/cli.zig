@@ -53,6 +53,7 @@ pub const arg_defs = [_]ArgDef{
     .{ .id = .out_glsl330, .value_hint = "<path>", .usage = "Output/validate GLSL 330 file at path" },
     .{ .id = .out_glsles, .value_hint = "<path>", .usage = "Output/validate GLSL ES 300 file at path" },
     .{ .id = .out_msl, .value_hint = "<path>", .usage = "Output/validate MSL file at path" },
+    .{ .id = .out_wgsl, .value_hint = "<path>", .usage = "Output/validate WGSL file at path" },
     .{ .id = .out_spv, .value_hint = "<path>", .usage = "Output/validate SPIR-V file at path" },
     .{ .id = .out_dxil, .value_hint = "<path>", .usage = "Output/validate DXIL file at path" },
     .{ .id = .spirv_env, .value_hint = "<env>", .usage = "SPIR-V target environment: opengl|vulkan1.0|vulkan1.1|vulkan1.2|vulkan1.3|vulkan1.4" },
@@ -307,6 +308,9 @@ pub fn appendDefaultOutSpecs(input_path: []const u8, stage: zsl.ir.ShaderStage, 
 
     const msl_path = try std.fmt.allocPrint(alloc, "{s}/{s}.metal", .{ dir, stem });
     try out_specs.append(alloc, .{ .kind = "msl", .path = msl_path });
+
+    const wgsl_path = try std.fmt.allocPrint(alloc, "{s}/{s}.wgsl", .{ dir, stem });
+    try out_specs.append(alloc, .{ .kind = "wgsl", .path = wgsl_path });
 
     const spirv_path = try std.fmt.allocPrint(alloc, "{s}/{s}.spv", .{ dir, stem });
     try out_specs.append(alloc, .{ .kind = "spirv", .path = spirv_path });

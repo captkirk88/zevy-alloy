@@ -130,7 +130,7 @@ pub const SpirvGenerator = struct {
                     glslc_args.appendSlice(alloc, &.{ "-o", spv_full, glsl_full }) catch return error.OutOfMemory;
 
                     break :blk ext.run(io, glslc_args.items) catch |e2| {
-                        if (e2 == error.NotFound) return error.ExternalCompilerNotFound;
+                        if (e2 == error.NotFound) return error.External_GLSLANG_CompilerNotFound;
                         return error.ExternalCompilerFailed;
                     };
                 }
@@ -142,13 +142,11 @@ pub const SpirvGenerator = struct {
         defer res.deinit();
 
         if (res.exit_code != 0) {
-            const stderr = res.stderr.readAlloc(alloc, res.stderr.end) catch |e| switch (e) {
-                error.OutOfMemory => "out of memory",
-                error.EndOfStream => "end of stream",
-                else => "unknown error",
-            };
-            defer alloc.free(stderr);
-            std.debug.print("glslangValidator/glslc error:\n// {s}\n", .{stderr});
+            if (res.stderr.len > 0) {
+                std.debug.print("glslangValidator/glslc error:\n// {s}\n", .{res.stderr});
+            } else {
+                std.debug.print("glslangValidator/glslc failed\n", .{});
+            }
             return error.ExternalCompilerFailed;
         }
 

@@ -86,18 +86,15 @@ pub const DxilGenerator = struct {
             dxil_full,
             hlsl_full,
         }) catch |e| {
-            if (e == error.NotFound) return error.ExternalCompilerNotFound;
+            if (e == error.NotFound) return error.External_DXC_CompilerNotFound;
             return error.ExternalCompilerFailed;
         };
         defer result.deinit();
 
         if (result.exit_code != 0) {
-            const stderr = result.stderr.readAlloc(alloc, result.stderr.end) catch |e| switch (e) {
-                error.OutOfMemory => "out of memory",
-                error.EndOfStream => "end of stream",
-                else => "unknown error",
-            };
-            writer.print("// dxc error:\n// {s}\n", .{stderr}) catch {};
+            if (result.stderr.len > 0) {
+                writer.print("// dxc error:\n// {s}\n", .{result.stderr}) catch {};
+            }
             return error.ExternalCompilerFailed;
         }
 

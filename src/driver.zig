@@ -64,6 +64,50 @@ fn generatorErrorMessage(e: iface.GenerateError) []const u8 {
     };
 }
 
+fn finalizeCompile(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    module: *ir.Module,
+    errors: *errmod.ErrorList,
+    generators: []iface.Generator,
+    opts: CompileOptions,
+) !CompileResult {
+    if (opts.compute_local_size_override) |local_size| {
+        module.compute_local_size = .{
+            .x = @max(local_size.x, 1),
+            .y = @max(local_size.y, 1),
+            .z = @max(local_size.z, 1),
+        };
+    }
+
+    const outputs = try alloc.alloc(GeneratorOutput, generators.len);
+    for (generators, 0..) |gen, i| {
+        outputs[i] = .{
+            .name = gen.name(),
+            .extension = gen.fileExtension(),
+            .content = null,
+            .err_message = null,
+        };
+
+        if (errors.count() > 0 and !opts.continue_on_generator_error) {
+            outputs[i].err_message = "skipped: parse errors";
+            continue;
+        }
+
+        const content = gen.generateToSlice(module, io, alloc) catch |e| {
+            outputs[i].err_message = generatorErrorMessage(e);
+            continue;
+        };
+        outputs[i].content = content;
+    }
+
+    return .{
+        .alloc = alloc,
+        .outputs = outputs,
+        .errors = errors.*,
+    };
+}
+
 /// Parse a .zsl source and run all provided generators.
 /// Returns a `CompileResult` which the caller must deinit.
 pub fn compile(
@@ -86,7 +130,7 @@ pub fn compile(
 
     // Parse — errors go into `errors`, we continue even on parse failure to
     // report generator results for partial IR.
-    parser.parse(source, file_path, &module, &errors, &resolver, &builtins) catch {};
+    parser.parse(alloc, source, file_path, &module, &errors, &resolver, &builtins) catch {};
 
     // Recursively load and parse any user ZSL modules discovered during the
     // initial parse (and transitively discovered by sub-modules). The index
@@ -100,48 +144,36 @@ pub fn compile(
             if (resolver.check(imp_path) != null) continue;
             if (std.Io.Dir.cwd().readFileAlloc(io, imp_path, alloc, .limited(1 * 1024 * 1024))) |imp_source| {
                 defer alloc.free(imp_source);
-                parser.parse(imp_source, imp_path, &module, &errors, &resolver, &builtins) catch {};
+                parser.parse(alloc, imp_source, imp_path, &module, &errors, &resolver, &builtins) catch {};
             } else |_| {
                 errors.addError(imp_path, 0, 0, "cannot read imported ZSL module", null) catch {};
             }
         }
     }
 
-    if (opts.compute_local_size_override) |local_size| {
-        module.compute_local_size = .{
-            .x = @max(local_size.x, 1),
-            .y = @max(local_size.y, 1),
-            .z = @max(local_size.z, 1),
-        };
-    }
+    return finalizeCompile(io, alloc, &module, &errors, generators, opts);
+}
 
-    // Run generators.
-    const outputs = try alloc.alloc(GeneratorOutput, generators.len);
-    for (generators, 0..) |gen, i| {
-        outputs[i] = .{
-            .name = gen.name(),
-            .extension = gen.fileExtension(),
-            .content = null,
-            .err_message = null,
-        };
+pub fn compileInMemory(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    generators: []iface.Generator,
+    opts: CompileOptions,
+) !CompileResult {
+    var errors = errmod.ErrorList.init(alloc);
+    var resolver = ImportResolver.init(io, alloc);
+    defer resolver.deinit();
 
-        if (errors.count() > 0 and !opts.continue_on_generator_error) {
-            outputs[i].err_message = "skipped: parse errors";
-            continue;
-        }
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
 
-        const content = gen.generateToSlice(&module, io, alloc) catch |e| {
-            outputs[i].err_message = generatorErrorMessage(e);
-            continue;
-        };
-        outputs[i].content = content;
-    }
+    var module = ir.Module.init(alloc, parser.in_memory_file_path);
+    defer module.deinit();
 
-    return .{
-        .alloc = alloc,
-        .outputs = outputs,
-        .errors = errors,
-    };
+    parser.parseInMemory(alloc, reader, &module, &errors, &resolver, &builtins) catch {};
+
+    return finalizeCompile(io, alloc, &module, &errors, generators, opts);
 }
 
 test "compile uses source compute local size" {
@@ -162,6 +194,28 @@ test "compile uses source compute local size" {
 
     try std.testing.expect(!result.hasErrors());
     try std.testing.expect(result.outputs.len == 1);
+    try std.testing.expect(result.outputs[0].content != null);
+    const out = result.outputs[0].content.?;
+    try std.testing.expect(std.mem.indexOf(u8, out, "layout(local_size_x = 8, local_size_y = 4, local_size_z = 2) in;") != null);
+}
+
+test "compile in memory reads source from reader" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var glsl_impl = @import("codegen/glsl.zig").GlslGenerator{ .version = .glsl450 };
+    var generators = [_]iface.Generator{glsl_impl.generator()};
+    var reader = std.Io.Reader.fixed(
+        \\const zsl = @import("zsl");
+        \\pub const compute: zsl.ComputeOpts = .{ .local_size_x = 8, .local_size_y = 4, .local_size_z = 2 };
+        \\pub fn main(_: zsl.Stage.compute) void {}
+    );
+
+    var result = try compileInMemory(io, alloc, &reader, &generators, .{});
+    defer result.deinit();
+
+    try std.testing.expect(!result.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.outputs.len);
     try std.testing.expect(result.outputs[0].content != null);
     const out = result.outputs[0].content.?;
     try std.testing.expect(std.mem.indexOf(u8, out, "layout(local_size_x = 8, local_size_y = 4, local_size_z = 2) in;") != null);

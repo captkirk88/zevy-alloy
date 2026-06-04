@@ -145,6 +145,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .format = .msl, .path = "examples/circle_color.metal" },
                 .{ .format = .spirv, .path = "examples/circle_color.spv" },
                 .{ .format = .dxil, .path = "examples/circle_color.dxil" },
+                .{ .format = .wgsl, .path = "examples/circle_color.wgsl" },
             },
             .spirv_env = .opengl,
             .dxil_model = .sm68,
@@ -157,6 +158,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .format = .hlsl, .path = "examples/factorial.hlsl" },
                 .{ .format = .dxil, .path = "examples/factorial.dxil" },
                 .{ .format = .spirv, .path = "examples/factorial.spv" },
+                .{ .format = .wgsl, .path = "examples/factorial.wgsl" },
             },
         },
     });
@@ -167,7 +169,6 @@ pub fn build(b: *std.Build) !void {
     const zevy_ecs_dep = b.dependency("zevy_ecs", .{ .target = target, .optimize = optimize });
 
     const zevy_ecs_mod = zevy_ecs_dep.module("zevy_ecs");
-    const plugins_mod = zevy_ecs_dep.module("plugins");
 
     const raylib_dep = b.dependency("raylib_zig", .{ .target = target, .optimize = optimize });
     const raylib_compute_dep = b.dependency("raylib_zig", .{
@@ -184,7 +185,6 @@ pub fn build(b: *std.Build) !void {
     // Without this, zevy_raylib resolves zevy_ecs from its own vendored copy, causing
     // Manager type mismatches when systems.zig checks ParamRegistry.apply signatures.
     zevy_raylib_mod.addImport("zevy_ecs", zevy_ecs_mod);
-    zevy_raylib_mod.addImport("plugins", plugins_mod);
 
     const circles_mod = b.createModule(.{
         .root_source_file = b.path("examples/circles.zig"),
@@ -192,7 +192,6 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zevy_ecs", .module = zevy_ecs_mod },
-            .{ .name = "plugins", .module = plugins_mod },
             .{ .name = "zevy_raylib", .module = zevy_raylib_mod },
             .{ .name = "raylib", .module = raylib_dep.module("raylib") },
         },

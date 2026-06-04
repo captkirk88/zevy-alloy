@@ -60,7 +60,7 @@ fn parseStage(
     var module = zsl.ir.Module.init(alloc, abs_path);
     defer module.deinit();
 
-    zsl.parse(source, abs_path, &module, &errors, &resolver, &builtins) catch {};
+    zsl.parse(alloc, source, abs_path, &module, &errors, &resolver, &builtins) catch {};
 
     var import_idx: usize = 0;
     while (import_idx < module.imported_paths.items.len) : (import_idx += 1) {
@@ -68,7 +68,7 @@ fn parseStage(
         if (resolver.check(imp_path) != null) continue;
         if (std.Io.Dir.cwd().readFileAlloc(io, imp_path, alloc, .limited(1 * 1024 * 1024))) |imp_source| {
             defer alloc.free(imp_source);
-            zsl.parse(imp_source, imp_path, &module, &errors, &resolver, &builtins) catch {};
+            zsl.parse(alloc, imp_source, imp_path, &module, &errors, &resolver, &builtins) catch {};
         } else |_| {
             errors.addError(imp_path, 0, 0, "cannot read imported ZSL module", null) catch {};
         }
@@ -100,6 +100,8 @@ fn selectGenerators(
     glsles_impl.* = .{ .version = .es300 };
     const msl_impl = try alloc.create(zsl.MslGenerator);
     msl_impl.* = .{};
+    const wgsl_impl = try alloc.create(zsl.WgslGenerator);
+    wgsl_impl.* = .{};
     const spirv_impl = try alloc.create(zsl.SpirvGenerator);
     spirv_impl.* = .{ .target_env = spirv_target_env, .target_spv = spirv_target_spv };
     const dxil_impl = try alloc.create(zsl.DxilGenerator);
@@ -111,6 +113,7 @@ fn selectGenerators(
         glsl330_impl.generator(),
         glsles_impl.generator(),
         msl_impl.generator(),
+        wgsl_impl.generator(),
         spirv_impl.generator(),
         dxil_impl.generator(),
     };
@@ -130,7 +133,7 @@ fn selectGenerators(
 
 fn runTool(
     io: std.Io,
-    alloc: std.mem.Allocator,
+    _: std.mem.Allocator,
     argv: []const []const u8,
     label: []const u8,
     err_w: *std.Io.Writer,
@@ -146,10 +149,8 @@ fn runTool(
     defer res.deinit();
 
     if (res.exit_code != 0) {
-        const stderr = res.stderr.readAlloc(alloc, res.stderr.end) catch "";
-        defer if (stderr.len > 0) alloc.free(stderr);
-        if (stderr.len > 0) {
-            err_w.print("Validation failed for {s}:\n{s}\n", .{ label, stderr }) catch {};
+        if (res.stderr.len > 0) {
+            err_w.print("Validation failed for {s}:\n{s}\n", .{ label, res.stderr }) catch {};
         } else {
             err_w.print("Validation failed for {s}: tool exited with code {d}\n", .{ label, res.exit_code }) catch {};
         }
@@ -222,6 +223,11 @@ fn validateOne(
         return true;
     }
 
+    if (std.mem.eql(u8, spec.kind, "wgsl")) {
+        out_w.print("Validation skipped for {s}: no cross-platform standalone WGSL validator configured\n", .{spec.path}) catch {};
+        return true;
+    }
+
     err_w.print("Validation failed for {s}: unknown shader kind '{s}'\n", .{ spec.path, spec.kind }) catch {};
     return false;
 }
@@ -277,7 +283,7 @@ fn commandCompile(init: std.process.Init, parsed: cli.Parsed, out_w: *std.Io.Wri
             out_w.print("Wrote {s}: {s} ({d} bytes)\n", .{ output.name, spec.path, content.len }) catch {};
         } else if (output.err_message) |msg| {
             err_w.print("{s} generator failed: {s}\n", .{ output.name, msg }) catch {};
-            if (!std.mem.eql(u8, msg, "ExternalCompilerNotFound") and
+            if (!std.mem.startsWith(u8, msg, "External_") and
                 !std.mem.eql(u8, msg, "ExternalCompilerFailed"))
             {
                 had_error = true;

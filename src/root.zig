@@ -15,6 +15,7 @@ pub const ImportResolver = @import("zsl/import_resolver.zig").ImportResolver;
 // Parser
 pub const parser = @import("zsl/parser.zig");
 pub const parse = parser.parse;
+pub const parseInMemory = parser.parseInMemory;
 // Generator interface
 pub const interface = @import("codegen/interface.zig");
 pub const Generator = interface.Generator;
@@ -25,6 +26,7 @@ pub const HlslGenerator = @import("codegen/hlsl.zig").HlslGenerator;
 pub const GlslGenerator = @import("codegen/glsl.zig").GlslGenerator;
 pub const GlslVersion = @import("codegen/glsl.zig").GlslVersion;
 pub const MslGenerator = @import("codegen/msl.zig").MslGenerator;
+pub const WgslGenerator = @import("codegen/wgsl.zig").WgslGenerator;
 pub const SpirvGenerator = @import("codegen/spirv.zig").SpirvGenerator;
 pub const external = @import("external_tools.zig");
 pub const SpirvTargetEnv = versions.SpirvTargetEnv;
@@ -34,6 +36,7 @@ pub const DxilShaderModel = versions.DxilShaderModel;
 // Driver
 pub const driver = @import("driver.zig");
 pub const compile = driver.compile;
+pub const compileInMemory = driver.compileInMemory;
 
 /// All output formats supported by the zevy-alloy shader compiler CLI.
 pub const ShaderFormat = versions.ShaderFormat;

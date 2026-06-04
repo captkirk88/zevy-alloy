@@ -11,3 +11,7 @@ test_data/
 *.hlsl
 *.metal
 *.spv
+*.wgsl
+*.wesl
+
+wgsl-test/

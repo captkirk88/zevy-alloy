@@ -37,10 +37,12 @@ pub const ParseError = error{
     Unsupported,
 };
 
+pub const in_memory_file_path = "<memory>";
+
 /// Context held during parsing of a single file.
 const Parser = struct {
-    mod_alloc: std.mem.Allocator,
     ast: Ast,
+    alloc: std.mem.Allocator,
     source: []const u8,
     file_path: []const u8,
     errors: *errmod.ErrorList,
@@ -53,6 +55,7 @@ const Parser = struct {
     /// local aliases: `const X = zsl.Y` → BuiltinKind of Y (for resource constructors).
     local_aliases: std.StringHashMap(stdlib.BuiltinKind),
     resolver: *ImportResolver,
+    allow_user_imports: bool,
 
     const ImportBinding = union(enum) {
         /// Points to the stdlib module
@@ -62,7 +65,7 @@ const Parser = struct {
     };
 
     fn init(
-        mod_alloc: std.mem.Allocator,
+        allocator: std.mem.Allocator,
         ast: Ast,
         source: []const u8,
         file_path: []const u8,
@@ -70,18 +73,20 @@ const Parser = struct {
         module: *ir.Module,
         zsl_builtins: *const std.StringHashMap(stdlib.BuiltinKind),
         resolver: *ImportResolver,
+        allow_user_imports: bool,
     ) Parser {
         return .{
-            .mod_alloc = mod_alloc,
+            .alloc = allocator,
             .ast = ast,
             .source = source,
             .file_path = file_path,
             .errors = errors,
             .module = module,
             .zsl_builtins = zsl_builtins,
-            .imports = std.StringHashMap(ImportBinding).init(mod_alloc),
-            .local_aliases = std.StringHashMap(stdlib.BuiltinKind).init(mod_alloc),
+            .imports = std.StringHashMap(ImportBinding).init(allocator),
+            .local_aliases = std.StringHashMap(stdlib.BuiltinKind).init(allocator),
             .resolver = resolver,
+            .allow_user_imports = allow_user_imports,
         };
     }
 
@@ -193,12 +198,22 @@ const Parser = struct {
             if (isStdlibZslImportPath(import_path)) {
                 try self.imports.put(var_name, .{ .stdlib = {} });
             } else if (std.mem.endsWith(u8, import_path, ".zsl")) {
+                if (!self.allow_user_imports) {
+                    self.errors.addError(
+                        self.file_path,
+                        self.tokenLine(path_tok),
+                        self.tokenColumn(path_tok),
+                        "cannot resolve imported ZSL module without a source file path",
+                        self.sourceLine(self.tokenLine(path_tok)),
+                    ) catch {};
+                    return;
+                }
                 const importer_dir = std.fs.path.dirname(self.file_path) orelse ".";
                 // Allocate the canonical path from mod_alloc so it is freed
                 // automatically when the module's arena is deinitialized.
-                const canonical = try self.resolver.resolve(self.mod_alloc, importer_dir, import_path);
+                const canonical = try self.resolver.resolve(self.alloc, importer_dir, import_path);
                 try self.imports.put(var_name, .{ .user_module = canonical });
-                try self.module.imported_paths.append(self.mod_alloc, canonical);
+                try self.module.imported_paths.append(self.alloc, canonical);
             }
         }
 
@@ -252,7 +267,7 @@ const Parser = struct {
         const main_tokens = self.ast.nodes.items(.main_token);
 
         var fields: std.ArrayList(ir.StructField) = .empty;
-        defer fields.deinit(self.mod_alloc);
+        defer fields.deinit(self.alloc);
 
         // Gather member nodes
         var buf: [2]Ast.Node.Index = undefined;
@@ -275,17 +290,17 @@ const Parser = struct {
             const field_type = try self.parseTypeNode(type_idx);
             const semantic = try self.extractFieldSemantic(member);
 
-            try fields.append(self.mod_alloc, .{
+            try fields.append(self.alloc, .{
                 .name = field_name,
                 .type = field_type,
                 .semantic = semantic,
             });
         }
 
-        try self.module.declarations.append(self.mod_alloc, .{
+        try self.module.declarations.append(self.alloc, .{
             .struct_type = .{
                 .name = name,
-                .fields = try self.mod_alloc.dupe(ir.StructField, fields.items),
+                .fields = try self.alloc.dupe(ir.StructField, fields.items),
             },
         });
     }
@@ -367,7 +382,7 @@ const Parser = struct {
             if (vd.ast.type_node.unwrap()) |type_node| {
                 if (try self.tryParseResourceTypeDecl(decl_name, type_node)) return;
                 const uniform_type = try self.parseTypeNode(type_node);
-                try self.module.declarations.append(self.mod_alloc, .{
+                try self.module.declarations.append(self.alloc, .{
                     .resource = .{
                         .name = decl_name,
                         .kind = .uniform,
@@ -402,7 +417,7 @@ const Parser = struct {
             },
             else => ir.Type{ .scalar = .f32 }, // type inference placeholder
         };
-        try self.module.declarations.append(self.mod_alloc, .{
+        try self.module.declarations.append(self.alloc, .{
             .constant = .{
                 .name = decl_name,
                 .type = const_type,
@@ -552,7 +567,7 @@ const Parser = struct {
         // Parse binding options from the second argument (struct literal), if present.
         const opts = self.parseBindingOpts(call_node) catch .{};
 
-        try self.module.declarations.append(self.mod_alloc, .{
+        try self.module.declarations.append(self.alloc, .{
             .resource = .{
                 .name = name,
                 .kind = kind,
@@ -617,7 +632,7 @@ const Parser = struct {
 
         const opts = self.parseBindingOpts(type_node) catch .{};
 
-        try self.module.declarations.append(self.mod_alloc, .{
+        try self.module.declarations.append(self.alloc, .{
             .resource = .{
                 .name = name,
                 .kind = kind,
@@ -696,7 +711,7 @@ const Parser = struct {
 
         // Parse parameters
         var params: std.ArrayList(ir.ParamDecl) = .empty;
-        defer params.deinit(self.mod_alloc);
+        defer params.deinit(self.alloc);
 
         var stage: ir.ShaderStage = .unknown;
 
@@ -724,7 +739,7 @@ const Parser = struct {
                 // Anonymous parameters (`_: T`) are discarded in any function.
                 if (std.mem.eql(u8, p_name, "_")) continue;
 
-                try params.append(self.mod_alloc, .{
+                try params.append(self.alloc, .{
                     .name = p_name,
                     .type = p_type,
                 });
@@ -739,17 +754,17 @@ const Parser = struct {
 
         // Parse body
         var stmts: std.ArrayList(ir.Statement) = .empty;
-        defer stmts.deinit(self.mod_alloc);
+        defer stmts.deinit(self.alloc);
         try self.parseBlock(actual_body_node, &stmts);
 
         const is_entry = stage != .unknown;
 
-        try self.module.declarations.append(self.mod_alloc, .{
+        try self.module.declarations.append(self.alloc, .{
             .function = .{
                 .name = fn_name,
-                .params = try self.mod_alloc.dupe(ir.ParamDecl, params.items),
+                .params = try self.alloc.dupe(ir.ParamDecl, params.items),
                 .return_type = return_type,
-                .body = try self.mod_alloc.dupe(ir.Statement, stmts.items),
+                .body = try self.alloc.dupe(ir.Statement, stmts.items),
                 .stage = stage,
                 .is_entry_point = is_entry,
             },
@@ -808,7 +823,7 @@ const Parser = struct {
         const block = self.ast.blockStatements(&buf, node) orelse return;
         for (block) |stmt_node| {
             const stmt = self.parseStatement(stmt_node) catch continue;
-            try out.append(self.mod_alloc, stmt);
+            try out.append(self.alloc, stmt);
         }
     }
 
@@ -820,7 +835,7 @@ const Parser = struct {
             },
             else => {
                 const stmt = self.parseStatement(node) catch return;
-                try out.append(self.mod_alloc, stmt);
+                try out.append(self.alloc, stmt);
             },
         }
     }
@@ -834,8 +849,8 @@ const Parser = struct {
             .block, .block_semicolon, .block_two, .block_two_semicolon => {
                 var inner: std.ArrayList(ir.Statement) = .empty;
                 try self.parseBlock(node, &inner);
-                defer inner.deinit(self.mod_alloc);
-                return .{ .block = try self.mod_alloc.dupe(ir.Statement, inner.items) };
+                defer inner.deinit(self.alloc);
+                return .{ .block = try self.alloc.dupe(ir.Statement, inner.items) };
             },
 
             .local_var_decl, .simple_var_decl => {
@@ -900,13 +915,13 @@ const Parser = struct {
                     .assign_shr => .shr,
                     else => unreachable,
                 };
-                const lhs_copy = try self.mod_alloc.create(ir.Expr);
+                const lhs_copy = try self.alloc.create(ir.Expr);
                 lhs_copy.* = target;
-                const rhs_copy = try self.mod_alloc.create(ir.Expr);
+                const rhs_copy = try self.alloc.create(ir.Expr);
                 rhs_copy.* = rhs_val;
-                const combined = try self.mod_alloc.create(ir.Expr);
+                const combined = try self.alloc.create(ir.Expr);
                 combined.* = .{ .binary = .{ .op = op, .lhs = lhs_copy, .rhs = rhs_copy } };
-                const target2 = try self.mod_alloc.create(ir.Expr);
+                const target2 = try self.alloc.create(ir.Expr);
                 target2.* = target;
                 return .{ .assign = .{ .target = target2.*, .value = combined.* } };
             },
@@ -977,18 +992,18 @@ const Parser = struct {
         };
         const cond = try self.parseExpr(full.ast.cond_expr);
         var then_stmts: std.ArrayList(ir.Statement) = .empty;
-        defer then_stmts.deinit(self.mod_alloc);
+        defer then_stmts.deinit(self.alloc);
         try self.parseStmtOrBlock(full.ast.then_expr, &then_stmts);
         var else_stmts: ?[]ir.Statement = null;
         if (full.ast.else_expr.unwrap()) |else_node| {
             var el: std.ArrayList(ir.Statement) = .empty;
-            defer el.deinit(self.mod_alloc);
+            defer el.deinit(self.alloc);
             try self.parseStmtOrBlock(else_node, &el);
-            else_stmts = try self.mod_alloc.dupe(ir.Statement, el.items);
+            else_stmts = try self.alloc.dupe(ir.Statement, el.items);
         }
         return .{ .if_stmt = .{
             .cond = cond,
-            .then = try self.mod_alloc.dupe(ir.Statement, then_stmts.items),
+            .then = try self.alloc.dupe(ir.Statement, then_stmts.items),
             .else_ = else_stmts,
         } };
     }
@@ -1008,11 +1023,11 @@ const Parser = struct {
         };
         const cond = try self.parseExpr(full.ast.cond_expr);
         var body: std.ArrayList(ir.Statement) = .empty;
-        defer body.deinit(self.mod_alloc);
+        defer body.deinit(self.alloc);
         try self.parseStmtOrBlock(full.ast.then_expr, &body);
         return .{ .while_stmt = .{
             .cond = cond,
-            .body = try self.mod_alloc.dupe(ir.Statement, body.items),
+            .body = try self.alloc.dupe(ir.Statement, body.items),
         } };
     }
 
@@ -1062,16 +1077,16 @@ const Parser = struct {
                 if (self.imports.get(base_name) != null) {
                     return .{ .ident = field_name };
                 }
-                const base = try self.mod_alloc.create(ir.Expr);
+                const base = try self.alloc.create(ir.Expr);
                 base.* = try self.parseExpr(base_node);
                 return .{ .field_access = .{ .base = base, .field = field_name } };
             },
 
             .array_access => {
                 const aa_base, const aa_idx = self.ast.nodeData(node).node_and_node;
-                const base_expr = try self.mod_alloc.create(ir.Expr);
+                const base_expr = try self.alloc.create(ir.Expr);
                 base_expr.* = try self.parseExpr(aa_base);
-                const idx_expr = try self.mod_alloc.create(ir.Expr);
+                const idx_expr = try self.alloc.create(ir.Expr);
                 idx_expr.* = try self.parseExpr(aa_idx);
                 return .{ .index = .{ .base = base_expr, .index = idx_expr } };
             },
@@ -1106,12 +1121,12 @@ const Parser = struct {
 
             // Unary
             .negation => {
-                const op = try self.mod_alloc.create(ir.Expr);
+                const op = try self.alloc.create(ir.Expr);
                 op.* = try self.parseExpr(self.ast.nodeData(node).node);
                 return .{ .unary = .{ .op = .neg, .operand = op } };
             },
             .bool_not => {
-                const op = try self.mod_alloc.create(ir.Expr);
+                const op = try self.alloc.create(ir.Expr);
                 op.* = try self.parseExpr(self.ast.nodeData(node).node);
                 return .{ .unary = .{ .op = .not, .operand = op } };
             },
@@ -1136,7 +1151,7 @@ const Parser = struct {
             .array_init_one_comma,
             => {
                 var ai_args: std.ArrayList(ir.Expr) = .empty;
-                defer ai_args.deinit(self.mod_alloc);
+                defer ai_args.deinit(self.alloc);
                 var ai_buf: [2]Ast.Node.Index = undefined;
                 const ai = self.ast.fullArrayInit(&ai_buf, node);
                 var ai_type: ir.Type = .{ .named = "unknown" };
@@ -1145,12 +1160,12 @@ const Parser = struct {
                         ai_type = try self.parseTypeNode(te);
                     }
                     for (a.ast.elements) |elem| {
-                        try ai_args.append(self.mod_alloc, try self.parseExpr(elem));
+                        try ai_args.append(self.alloc, try self.parseExpr(elem));
                     }
                 }
                 return .{ .construct = .{
                     .type = ai_type,
-                    .args = try self.mod_alloc.dupe(ir.Expr, ai_args.items),
+                    .args = try self.alloc.dupe(ir.Expr, ai_args.items),
                 } };
             },
 
@@ -1164,9 +1179,9 @@ const Parser = struct {
 
     fn parseBinOp(self: *Parser, node: Ast.Node.Index, op: ir.BinOp) error{OutOfMemory}!ir.Expr {
         const bin_lhs, const bin_rhs = self.ast.nodeData(node).node_and_node;
-        const lhs = try self.mod_alloc.create(ir.Expr);
+        const lhs = try self.alloc.create(ir.Expr);
         lhs.* = try self.parseExpr(bin_lhs);
-        const rhs = try self.mod_alloc.create(ir.Expr);
+        const rhs = try self.alloc.create(ir.Expr);
         rhs.* = try self.parseExpr(bin_rhs);
         return .{ .binary = .{ .op = op, .lhs = lhs, .rhs = rhs } };
     }
@@ -1188,23 +1203,23 @@ const Parser = struct {
         }
 
         var args: std.ArrayList(ir.Expr) = .empty;
-        defer args.deinit(self.mod_alloc);
+        defer args.deinit(self.alloc);
         for (call_full.ast.params) |arg_node| {
-            try args.append(self.mod_alloc, try self.parseExpr(arg_node));
+            try args.append(self.alloc, try self.parseExpr(arg_node));
         }
 
         return .{ .call = .{
             .callee = callee,
-            .args = try self.mod_alloc.dupe(ir.Expr, args.items),
+            .args = try self.alloc.dupe(ir.Expr, args.items),
         } };
     }
 
     fn parseConstructExpr(self: *Parser, node: Ast.Node.Index) error{OutOfMemory}!ir.Expr {
         // Gather field values (for struct_init) or args.
         var args: std.ArrayList(ir.Expr) = .empty;
-        defer args.deinit(self.mod_alloc);
+        defer args.deinit(self.alloc);
         var field_names: std.ArrayList([]const u8) = .empty;
-        defer field_names.deinit(self.mod_alloc);
+        defer field_names.deinit(self.alloc);
 
         var buf: [2]Ast.Node.Index = undefined;
         const si = self.ast.fullStructInit(&buf, node);
@@ -1220,16 +1235,16 @@ const Parser = struct {
                 //   `.` `fieldname` `=` [first-token-of-value]
                 // So: first_token_of_value - 2 = fieldname.
                 const first = self.ast.firstToken(f);
-                const name = try self.mod_alloc.dupe(u8, self.ast.tokenSlice(first - 2));
-                try field_names.append(self.mod_alloc, name);
-                try args.append(self.mod_alloc, try self.parseExpr(f));
+                const name = try self.alloc.dupe(u8, self.ast.tokenSlice(first - 2));
+                try field_names.append(self.alloc, name);
+                try args.append(self.alloc, try self.parseExpr(f));
             }
         }
 
         return .{ .construct = .{
             .type = type_expr,
-            .args = try self.mod_alloc.dupe(ir.Expr, args.items),
-            .field_names = try self.mod_alloc.dupe([]const u8, field_names.items),
+            .args = try self.alloc.dupe(ir.Expr, args.items),
+            .field_names = try self.alloc.dupe([]const u8, field_names.items),
         } };
     }
 
@@ -1278,7 +1293,7 @@ const Parser = struct {
             .ptr_type_aligned, .ptr_type_bit_range, .ptr_type, .ptr_type_sentinel => {
                 const pt = self.ast.fullPtrType(node) orelse return .{ .named = "ptr" };
                 const inner = try self.parseTypeNode(pt.ast.child_type);
-                const inner_alloc = try self.mod_alloc.create(ir.Type);
+                const inner_alloc = try self.alloc.create(ir.Type);
                 inner_alloc.* = inner;
                 return .{ .ptr = .{
                     .pointee = inner_alloc,
@@ -1290,7 +1305,7 @@ const Parser = struct {
             .array_type => {
                 const at = self.ast.arrayType(node);
                 const elem = try self.parseTypeNode(at.ast.elem_type);
-                const elem_alloc = try self.mod_alloc.create(ir.Type);
+                const elem_alloc = try self.alloc.create(ir.Type);
                 elem_alloc.* = elem;
                 return .{ .array = .{ .element = elem_alloc, .len = null } };
             },
@@ -1376,18 +1391,18 @@ fn parseParenIndex(s: []const u8) u32 {
 /// Parse a .zsl source file and populate `module`.
 /// `module` must be initialized by the caller. Errors are reported via `errors`.
 /// Returns `ParseFailed` if there were any parse errors.
-pub fn parse(
-    source: []const u8,
+fn parseSourceZ(
+    _: std.mem.Allocator,
+    source_z: [:0]const u8,
     file_path: []const u8,
+    allow_user_imports: bool,
     module: *ir.Module,
     errors: *errmod.ErrorList,
     resolver: *ImportResolver,
     zsl_builtins: *const std.StringHashMap(stdlib.BuiltinKind),
 ) ParseError!void {
-    // Allocate source and AST from the module's arena so that all tokenSlice()
-    // results (which are slices into source_z) remain valid for the module's lifetime.
     const mod_alloc = module.allocator();
-    const source_z = try mod_alloc.dupeZ(u8, source);
+    const source = source_z[0..source_z.len];
     var ast = try std.zig.Ast.parse(mod_alloc, source_z, .zig);
 
     // Report any Zig syntax errors.
@@ -1406,7 +1421,7 @@ pub fn parse(
         return error.ParseFailed;
     }
 
-    var parser = Parser.init(module.allocator(), ast, source, file_path, errors, module, zsl_builtins, resolver);
+    var parser = Parser.init(mod_alloc, ast, source, file_path, errors, module, zsl_builtins, resolver, allow_user_imports);
     defer parser.deinit();
 
     try resolver.markInProgress(file_path);
@@ -1414,6 +1429,42 @@ pub fn parse(
     try resolver.markDone(file_path);
 
     if (errors.count() > 0) return error.ParseFailed;
+}
+
+pub fn parse(
+    _: std.mem.Allocator,
+    source: []const u8,
+    file_path: []const u8,
+    module: *ir.Module,
+    errors: *errmod.ErrorList,
+    resolver: *ImportResolver,
+    zsl_builtins: *const std.StringHashMap(stdlib.BuiltinKind),
+) ParseError!void {
+    // Allocate source and AST from the module's arena so that all tokenSlice()
+    // results (which are slices into source_z) remain valid for the module's lifetime.
+    const mod_alloc = module.allocator();
+    const source_z = try mod_alloc.dupeZ(u8, source);
+    return parseSourceZ(mod_alloc, source_z, file_path, true, module, errors, resolver, zsl_builtins);
+}
+
+pub fn parseInMemory(
+    _: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    module: *ir.Module,
+    errors: *errmod.ErrorList,
+    resolver: *ImportResolver,
+    zsl_builtins: *const std.StringHashMap(stdlib.BuiltinKind),
+) ParseError!void {
+    const mod_alloc = module.allocator();
+    const source_z = reader.allocRemainingAlignedSentinel(mod_alloc, .unlimited, .of(u8), 0) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ReadFailed => {
+            try errors.addError(in_memory_file_path, 0, 0, "cannot read in-memory source", null);
+            return error.ParseFailed;
+        },
+        error.StreamTooLong => unreachable,
+    };
+    return parseSourceZ(mod_alloc, source_z, in_memory_file_path, false, module, errors, resolver, zsl_builtins);
 }
 
 //  Tests
@@ -1429,8 +1480,53 @@ test "parse empty file" {
     var mod = ir.Module.init(alloc, "test.zsl");
     defer mod.deinit();
 
-    parse("", "test.zsl", &mod, &errors, &resolver, &builtins) catch {};
+    parse(alloc, "", "test.zsl", &mod, &errors, &resolver, &builtins) catch {};
     try std.testing.expectEqual(@as(usize, 0), mod.declarations.items.len);
+}
+
+test "parse in memory reads source from reader" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, in_memory_file_path);
+    defer mod.deinit();
+
+    var reader = std.Io.Reader.fixed(
+        \\const zsl = @import("zsl");
+        \\pub fn main(_: zsl.Stage.fragment) void {}
+    );
+
+    try parseInMemory(alloc, &reader, &mod, &errors, &resolver, &builtins);
+    try std.testing.expectEqual(@as(usize, 0), errors.count());
+    try std.testing.expect(mod.anyEntryPoint() != null);
+}
+
+test "parse in memory rejects user zsl imports without file path" {
+    const alloc = std.testing.allocator;
+    var errors = errmod.ErrorList.init(alloc);
+    defer errors.deinit();
+    var resolver = ImportResolver.init(std.testing.io, alloc);
+    defer resolver.deinit();
+    var builtins = try stdlib.buildLookup(alloc);
+    defer builtins.deinit();
+    var mod = ir.Module.init(alloc, in_memory_file_path);
+    defer mod.deinit();
+
+    var reader = std.Io.Reader.fixed(
+        \\const utils = @import("utils.zsl");
+        \\pub fn main() void {
+        \\    _ = utils;
+        \\}
+    );
+
+    parseInMemory(alloc, &reader, &mod, &errors, &resolver, &builtins) catch {};
+    try std.testing.expect(errors.count() > 0);
+    try std.testing.expectEqualStrings(in_memory_file_path, errors.errors.items[0].file_path);
+    try std.testing.expect(std.mem.indexOf(u8, errors.errors.items[0].message, "without a source file path") != null);
 }
 
 test "parse simple struct" {
@@ -1450,7 +1546,7 @@ test "parse simple struct" {
         \\    v_color: f32,
         \\};
     ;
-    parse(src, "test.zsl", &mod, &errors, &resolver, &builtins) catch {};
+    parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins) catch {};
     if (errors.count() > 0) {
         var aw: std.Io.Writer.Allocating = .init(alloc);
         defer aw.deinit();
@@ -1485,7 +1581,7 @@ test "parse entry point with arbitrary io type names" {
         \\}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 3), mod.declarations.items.len);
 
     var found_input_struct = false;
@@ -1531,7 +1627,7 @@ test "parse pub var uniform" {
         \\}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 2), mod.declarations.items.len);
     var found_uniform = false;
     for (mod.declarations.items) |decl| {
@@ -1571,7 +1667,7 @@ test "parse pub var uniform buffer" {
         \\}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     var found_buffer = false;
     for (mod.declarations.items) |decl| {
         switch (decl) {
@@ -1609,7 +1705,7 @@ test "parse pub var storage buffer" {
         \\}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     var found_buffer = false;
     for (mod.declarations.items) |decl| {
         switch (decl) {
@@ -1650,7 +1746,7 @@ test "parse single-line if return statements" {
         \\}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 0), errors.count());
 
     var found_wrap = false;
@@ -1692,7 +1788,7 @@ test "parse parenthesized unary if condition" {
         \\}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 0), errors.count());
 
     var found_main = false;
@@ -1749,7 +1845,7 @@ test "parse stdlib import via path" {
         \\}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 0), errors.count());
     try std.testing.expectEqual(@as(usize, 0), mod.imported_paths.items.len);
 }
@@ -1772,7 +1868,7 @@ test "parse module-level compute local size" {
         \\}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 0), errors.count());
     try std.testing.expect(mod.compute_local_size != null);
     const size = mod.compute_local_size.?;
@@ -1797,7 +1893,7 @@ test "anonymous stage param `_: zsl.Stage.X` is recognised as entry point" {
         \\pub fn main(_: zsl.Stage.fragment) void {}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 0), errors.count());
     var found = false;
     for (mod.declarations.items) |decl| {
@@ -1830,7 +1926,7 @@ test "anonymous `_: T` params in non-entry-point functions are silently dropped"
         \\pub fn main(_: zsl.Stage.fragment) void {}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 0), errors.count());
     var found = false;
     for (mod.declarations.items) |decl| {
@@ -1862,7 +1958,7 @@ test "import field-access alias (const abs = zsl.abs) is silently skipped" {
         \\pub fn main(_: zsl.Stage.fragment) void {}
     ;
 
-    try parse(src, "test.zsl", &mod, &errors, &resolver, &builtins);
+    try parse(alloc, src, "test.zsl", &mod, &errors, &resolver, &builtins);
     try std.testing.expectEqual(@as(usize, 0), errors.count());
     // sin/abs aliases must NOT appear as constants or resources.
     for (mod.declarations.items) |decl| {
