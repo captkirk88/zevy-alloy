@@ -18,18 +18,14 @@
             .hash = "zevy_buildtools-1.3.2-AG3r_IMOAQBvTaraIbje0VPv3I9jWxz67Cqoq4cr_Z_C",
         },
         .zevy_ecs = .{
-            .url = "git+https://github.com/captkirk88/zevy-ecs#87874ca00b3ddbc4120fe9c15bfa8c4a5759c121",
-            .hash = "zevy_ecs-3.0.1-VoL9mcNhCgBGnLhvYrbSRwHzMZyWqnxUDiEk34IPPno0",
+            .url = "git+https://github.com/captkirk88/zevy-ecs#1d875bdd5c60f657329d2f909fa172149d35bd30",
+            .hash = "zevy_ecs-3.0.1-VoL9md5gCgB2ZmEWc6gU_jqDTwSQbRh7cd_cUY6P3mt-",
+            //.path = "../zevy-ecs",
         },
-        // .zevy_ecs = .{
-        //     .path = "../zevy-ecs",
-        // },
-        // .zevy_raylib = .{
-        //     .path = "../zevy_raylib",
-        // },
         .zevy_raylib = .{
-            .url = "git+https://github.com/captkirk88/zevy-raylib#dddce772dab33eecbd3a2ad498a578a18237783e",
-            .hash = "zevy_raylib-0.2.3-6RwEibZ5GgC_QbEH4XqWr2Yn45LSMFuoQJo-PjYYeJvp",
+            .url = "git+https://github.com/captkirk88/zevy-raylib#305e25993554e25595e038fad7e80723f4a25af7",
+            .hash = "zevy_raylib-0.2.6-6RwEiRJ9GgDgtTSR99mHLZhN57xIzAG3b_7CLRK2rUUD",
+            // .path = "../zevy_raylib",
         },
         .raylib_zig = .{
             .url = "git+https://github.com/raylib-zig/raylib-zig#97be2c7ae646a2f09856604b138c427c0af1b952",

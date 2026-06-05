@@ -160,6 +160,8 @@ pub fn build(b: *std.Build) !void {
                 .{ .format = .spirv, .path = "examples/factorial.spv" },
                 .{ .format = .wgsl, .path = "examples/factorial.wgsl" },
             },
+            .spirv_env = .opengl,
+            .dxil_model = .sm66,
         },
     });
 
@@ -170,14 +172,14 @@ pub fn build(b: *std.Build) !void {
 
     const zevy_ecs_mod = zevy_ecs_dep.module("zevy_ecs");
 
-    const raylib_dep = b.dependency("raylib_zig", .{ .target = target, .optimize = optimize });
-    const raylib_compute_dep = b.dependency("raylib_zig", .{
-        .target = target,
-        .optimize = optimize,
-        .opengl_version = .gl_4_3,
-    });
+    // const raylib_dep = b.dependency("raylib_zig", .{ .target = target, .optimize = optimize });
+    // const raylib_compute_dep = b.dependency("raylib_zig", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .opengl_version = .gl_4_3,
+    // });
 
-    b.installArtifact(raylib_dep.artifact("raylib"));
+    // b.installArtifact(raylib_dep.artifact("raylib"));
 
     const zevy_raylib_dep = b.dependency("zevy_raylib", .{ .target = target, .optimize = optimize });
     const zevy_raylib_mod = zevy_raylib_dep.module("zevy_raylib");
@@ -185,6 +187,9 @@ pub fn build(b: *std.Build) !void {
     // Without this, zevy_raylib resolves zevy_ecs from its own vendored copy, causing
     // Manager type mismatches when systems.zig checks ParamRegistry.apply signatures.
     zevy_raylib_mod.addImport("zevy_ecs", zevy_ecs_mod);
+    // Force zevy_raylib's internal @import("app") to match the same zevy_ecs app module
+    // that circles imports. This keeps ExitAppEvent/EventStore types identical.
+    zevy_raylib_mod.addImport("app", zevy_ecs_dep.module("app"));
 
     const circles_mod = b.createModule(.{
         .root_source_file = b.path("examples/circles.zig"),
@@ -193,7 +198,8 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "zevy_ecs", .module = zevy_ecs_mod },
             .{ .name = "zevy_raylib", .module = zevy_raylib_mod },
-            .{ .name = "raylib", .module = raylib_dep.module("raylib") },
+            // .{ .name = "raylib", .module = raylib_dep.module("raylib") },
+            .{ .name = "app", .module = zevy_ecs_dep.module("app") },
         },
     });
 
@@ -213,7 +219,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "raylib", .module = raylib_compute_dep.module("raylib") },
+            .{ .name = "zevy_raylib", .module = zevy_raylib_mod },
         },
     });
 

@@ -13,7 +13,7 @@
 //!   12! = 479001600
 
 const std = @import("std");
-const rl = @import("raylib");
+const rl = @import("zevy_raylib").rl;
 
 const N: u32 = 13; // computes 0! through 12!
 const BUF_BYTES: u32 = N * @sizeOf(u32);

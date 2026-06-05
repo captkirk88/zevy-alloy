@@ -99,6 +99,7 @@ pub const SpirvGenerator = struct {
         defer alloc.free(spv_full);
 
         // 4. Invoke glslangValidator or glslc.
+        // glslangValidator does not support `--target-spv`; SPIR-V version targeting via `--target-env spirvX.Y`.
         const result = blk: {
             var glslang_args: std.ArrayList([]const u8) = .empty;
             defer glslang_args.deinit(alloc);
@@ -110,7 +111,7 @@ pub const SpirvGenerator = struct {
             }
             glslang_args.appendSlice(alloc, &.{ "--client", self.target_env.glslangClientArg() }) catch return error.OutOfMemory;
             if (self.target_spv) |spv| {
-                glslang_args.appendSlice(alloc, &.{ "--target-spv", spv.arg() }) catch return error.OutOfMemory;
+                glslang_args.appendSlice(alloc, &.{ "--target-env", spv.arg() }) catch return error.OutOfMemory;
             }
             glslang_args.appendSlice(alloc, &.{ "-o", spv_full, glsl_full }) catch return error.OutOfMemory;
 
@@ -136,6 +137,7 @@ pub const SpirvGenerator = struct {
                 }
                 return error.ExternalCompilerFailed;
             };
+
             break :blk r;
         };
         var res = result;
