@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const zevy_ecs = @import("zevy_ecs");
-const app = @import("app");
+const app = zevy_ecs.app;
 const zevy_raylib = @import("zevy_raylib");
 const rl = zevy_raylib.rl;
 

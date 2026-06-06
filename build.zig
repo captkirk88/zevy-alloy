@@ -187,9 +187,6 @@ pub fn build(b: *std.Build) !void {
     // Without this, zevy_raylib resolves zevy_ecs from its own vendored copy, causing
     // Manager type mismatches when systems.zig checks ParamRegistry.apply signatures.
     zevy_raylib_mod.addImport("zevy_ecs", zevy_ecs_mod);
-    // Force zevy_raylib's internal @import("app") to match the same zevy_ecs app module
-    // that circles imports. This keeps ExitAppEvent/EventStore types identical.
-    zevy_raylib_mod.addImport("app", zevy_ecs_dep.module("app"));
 
     const circles_mod = b.createModule(.{
         .root_source_file = b.path("examples/circles.zig"),
@@ -199,7 +196,6 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "zevy_ecs", .module = zevy_ecs_mod },
             .{ .name = "zevy_raylib", .module = zevy_raylib_mod },
             // .{ .name = "raylib", .module = raylib_dep.module("raylib") },
-            .{ .name = "app", .module = zevy_ecs_dep.module("app") },
         },
     });
 
