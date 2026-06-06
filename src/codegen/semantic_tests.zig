@@ -20,6 +20,7 @@ const zsl = @import("../root.zig");
 const ShaderHarness = struct {
     alloc: std.mem.Allocator,
     glsl: []const u8,
+    wgsl: []const u8,
     hlsl: []const u8,
     msl: []const u8,
 
@@ -28,10 +29,12 @@ const ShaderHarness = struct {
     pub fn init(source: []const u8, alloc: std.mem.Allocator) !ShaderHarness {
         const io = std.testing.io;
         var glsl_impl = zsl.GlslGenerator{ .version = .glsl450 };
+        var wgsl_impl = zsl.WgslGenerator{};
         var hlsl_impl = zsl.HlslGenerator{};
         var msl_impl = zsl.MslGenerator{};
         var generators = [_]zsl.Generator{
             glsl_impl.generator(),
+            wgsl_impl.generator(),
             hlsl_impl.generator(),
             msl_impl.generator(),
         };
@@ -44,12 +47,14 @@ const ShaderHarness = struct {
         }
 
         const glsl_out = if (result.outputs[0].content) |c| c else return error.GlslFailed;
-        const hlsl_out = if (result.outputs[1].content) |c| c else return error.HlslFailed;
-        const msl_out = if (result.outputs[2].content) |c| c else return error.MslFailed;
+        const wgsl_out = if (result.outputs[1].content) |c| c else return error.WgslFailed;
+        const hlsl_out = if (result.outputs[2].content) |c| c else return error.HlslFailed;
+        const msl_out = if (result.outputs[3].content) |c| c else return error.MslFailed;
 
         return .{
             .alloc = alloc,
             .glsl = try alloc.dupe(u8, glsl_out),
+            .wgsl = try alloc.dupe(u8, wgsl_out),
             .hlsl = try alloc.dupe(u8, hlsl_out),
             .msl = try alloc.dupe(u8, msl_out),
         };
@@ -57,6 +62,7 @@ const ShaderHarness = struct {
 
     pub fn deinit(self: *ShaderHarness) void {
         self.alloc.free(self.glsl);
+        self.alloc.free(self.wgsl);
         self.alloc.free(self.hlsl);
         self.alloc.free(self.msl);
     }
@@ -66,6 +72,13 @@ const ShaderHarness = struct {
     pub fn expectGlsl(self: *const ShaderHarness, needle: []const u8) !void {
         if (std.mem.indexOf(u8, self.glsl, needle) == null) {
             std.debug.print("\nGLSL missing: \"{s}\"\n--- GLSL output ---\n{s}\n", .{ needle, self.glsl });
+            return error.TestExpectedEqual;
+        }
+    }
+
+    pub fn expectWgsl(self: *const ShaderHarness, needle: []const u8) !void {
+        if (std.mem.indexOf(u8, self.wgsl, needle) == null) {
+            std.debug.print("\nWGSL missing: \"{s}\"\n--- WGSL output ---\n{s}\n", .{ needle, self.wgsl });
             return error.TestExpectedEqual;
         }
     }
@@ -87,6 +100,7 @@ const ShaderHarness = struct {
     /// Assert `needle` appears in every backend's output.
     pub fn expectAll(self: *const ShaderHarness, needle: []const u8) !void {
         try self.expectGlsl(needle);
+        try self.expectWgsl(needle);
         try self.expectHlsl(needle);
         try self.expectMsl(needle);
     }
@@ -96,6 +110,13 @@ const ShaderHarness = struct {
     pub fn expectNotGlsl(self: *const ShaderHarness, needle: []const u8) !void {
         if (std.mem.indexOf(u8, self.glsl, needle) != null) {
             std.debug.print("\nGLSL should NOT contain: \"{s}\"\n--- GLSL output ---\n{s}\n", .{ needle, self.glsl });
+            return error.TestExpectedEqual;
+        }
+    }
+
+    pub fn expectNotWgsl(self: *const ShaderHarness, needle: []const u8) !void {
+        if (std.mem.indexOf(u8, self.wgsl, needle) != null) {
+            std.debug.print("\nWGSL should NOT contain: \"{s}\"\n--- WGSL output ---\n{s}\n", .{ needle, self.wgsl });
             return error.TestExpectedEqual;
         }
     }
@@ -117,6 +138,7 @@ const ShaderHarness = struct {
     /// Assert `needle` appears in NO backend's output.
     pub fn expectNone(self: *const ShaderHarness, needle: []const u8) !void {
         try self.expectNotGlsl(needle);
+        try self.expectNotWgsl(needle);
         try self.expectNotHlsl(needle);
         try self.expectNotMsl(needle);
     }
@@ -138,6 +160,7 @@ test "SVPosition emits position semantic in all backends" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectGlsl("gl_Position");
+    try h.expectWgsl("position");
     try h.expectHlsl("SV_POSITION");
     try h.expectMsl("[[position]]");
 }
@@ -156,6 +179,7 @@ test "SVTarget(0) emits color-output semantic in all backends" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectGlsl("out vec4 o_color");
+    try h.expectWgsl("@location(0) o_color");
     try h.expectHlsl("SV_Target");
     try h.expectMsl("[[color(0)]]");
 }
@@ -175,6 +199,10 @@ test "SVTarget(1) emits indexed color-output semantic" {
     ;
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
+    try h.expectGlsl("layout(location = 0) out vec4 o_color");
+    try h.expectGlsl("layout(location = 1) out vec4 o_bloom");
+    try h.expectWgsl("@location(0) o_color");
+    try h.expectWgsl("@location(1) o_bloom");
     try h.expectHlsl("SV_Target1");
     try h.expectMsl("[[color(1)]]");
 }
@@ -202,6 +230,7 @@ test "TexCoord(0) emits interpolant semantic in all backends" {
     defer h.deinit();
     // GLSL: input attribute at location 0 (first field of the input struct).
     try h.expectGlsl("layout(location = 0) in vec2 uv");
+    try h.expectWgsl("@location(0) uv");
     try h.expectHlsl("TEXCOORD0");
     try h.expectMsl("[[user(locn0)]]");
 }
@@ -221,6 +250,8 @@ test "TexCoord(1) emits indexed interpolant semantic" {
     ;
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
+    try h.expectGlsl("layout(location = 1) out vec2 uv2");
+    try h.expectWgsl("@location(0) uv2");
     try h.expectHlsl("TEXCOORD1");
     try h.expectMsl("[[user(locn1)]]");
 }
@@ -240,6 +271,8 @@ test "Color(0) emits color interpolant semantic in all backends" {
     ;
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
+    try h.expectGlsl("layout(location = 1) out vec4 col");
+    try h.expectWgsl("@location(0) col");
     try h.expectHlsl("COLOR0");
     try h.expectMsl("[[user(color0)]]");
 }
@@ -262,6 +295,8 @@ test "Normal emits normal semantic in HLSL and MSL" {
     ;
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
+    try h.expectNotGlsl("norm should not appear in GLSL");
+    try h.expectNotWgsl("norm should not appear in WGSL");
     try h.expectHlsl("NORMAL");
     try h.expectMsl("[[user(normal)]]");
 }
@@ -284,6 +319,8 @@ test "Tangent emits tangent semantic in HLSL and MSL" {
     ;
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
+    try h.expectNotGlsl("tng should not appear in GLSL");
+    try h.expectNotWgsl("tng should not appear in WGSL");
     try h.expectHlsl("TANGENT");
     try h.expectMsl("[[user(tangent)]]");
 }
@@ -306,6 +343,8 @@ test "InstanceId emits instance-id semantic in all backends" {
     ;
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
+    try h.expectGlsl("layout(location = 0) in uint inst");
+    try h.expectWgsl("@builtin(instance_index) inst: u32");
     try h.expectHlsl("SV_InstanceID");
     try h.expectMsl("[[instance_id]]");
 }
@@ -328,6 +367,8 @@ test "VertexId emits vertex-id semantic in all backends" {
     ;
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
+    try h.expectGlsl("layout(location = 0) in uint vid");
+    try h.expectWgsl("@builtin(vertex_index) vid: u32");
     try h.expectHlsl("SV_VertexID");
     try h.expectMsl("[[vertex_id]]");
 }
@@ -346,6 +387,7 @@ test "FragDepth emits depth-output semantic in all backends" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectGlsl("gl_FragDepth");
+    try h.expectWgsl("@builtin(frag_depth) depth: f32");
     try h.expectHlsl("SV_Depth");
     try h.expectMsl("[[depth(any)]]");
 }
@@ -364,6 +406,7 @@ test "InvocationId maps to backend thread-index builtins" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectGlsl("gl_GlobalInvocationID");
+    try h.expectWgsl("global_invocation_id");
     try h.expectHlsl("SV_DispatchThreadID");
     try h.expectMsl("thread_position_in_grid");
 }
@@ -386,6 +429,9 @@ test "Stage.vertex entry point emits vertex qualifier" {
     try h.expectMsl("vertex ");
     // HLSL and GLSL don't add a qualifier keyword but the output must be non-empty.
     try h.expectGlsl("void main()");
+    try h.expectWgsl("@vertex");
+    try h.expectWgsl("fn vs()");
+    try h.expectHlsl("vs()");
 }
 
 test "Stage.fragment entry point emits fragment qualifier" {
@@ -403,6 +449,9 @@ test "Stage.fragment entry point emits fragment qualifier" {
     defer h.deinit();
     try h.expectMsl("fragment ");
     try h.expectGlsl("void main()");
+    try h.expectWgsl("@fragment");
+    try h.expectWgsl("fn fs()");
+    try h.expectHlsl("fs()");
 }
 
 test "Stage.compute entry point emits compute qualifier" {
@@ -414,6 +463,7 @@ test "Stage.compute entry point emits compute qualifier" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectGlsl("layout(local_size_x = 8");
+    try h.expectWgsl("workgroup_size(8");
     try h.expectHlsl("[numthreads(8");
     try h.expectMsl("kernel ");
 }
@@ -452,8 +502,13 @@ test "circle fragment shader feature set compiles across text backends" {
 
     try h.expectGlsl("uniform float time");
     try h.expectGlsl("layout(location = 1) in vec4 v_color");
+
+    try h.expectWgsl("time: f32");
+    try h.expectWgsl("@location(0) v_color: vec4<f32>");
+
     try h.expectHlsl("float time");
     try h.expectHlsl("COLOR0");
+
     try h.expectMsl("constant float& time");
     try h.expectMsl("[[user(color0)]]");
 }
@@ -469,6 +524,7 @@ test "Uniform resource emits uniform declaration" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectGlsl("uniform float time");
+    try h.expectWgsl("var<uniform> time: f32");
     try h.expectHlsl("float time");
 }
 
@@ -481,6 +537,7 @@ test "pub var plain uniform emits uniform declaration" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectGlsl("uniform float time");
+    try h.expectWgsl("var<uniform> time: f32");
     try h.expectHlsl("float time");
 }
 
@@ -508,6 +565,7 @@ test "Texture2D emits sampler2D in GLSL, Texture2D in HLSL, texture2d in MSL" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectGlsl("sampler2D tex");
+    try h.expectWgsl("var tex: texture_2d<f32>;");
     try h.expectHlsl("Texture2D tex");
     // MSL: resource injected as entry-point function parameter.
     try h.expectMsl("texture2d<float> tex [[texture(0)]]");
@@ -526,6 +584,7 @@ test "Sampler emits sampler declaration in HLSL and MSL" {
     try h.expectMsl("sampler samp [[sampler(1)]]");
     // GLSL combines samplers with textures; standalone sampler is emitted as comment.
     try h.expectGlsl("// sampler 'samp' is combined with texture");
+    try h.expectWgsl("var samp: sampler;");
 }
 
 test "SamplerComparison emits comparison sampler in HLSL and MSL" {
@@ -536,6 +595,8 @@ test "SamplerComparison emits comparison sampler in HLSL and MSL" {
     ;
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
+    try h.expectNotGlsl("shadow should not appear in GLSL");
+    try h.expectNotWgsl("shadow should not appear in WGSL");
     try h.expectHlsl("SamplerComparisonState shadow");
     // MSL: resource injected as entry-point function parameter.
     try h.expectMsl("sampler shadow [[sampler(3)]]");
@@ -553,6 +614,7 @@ test "discard() emits fragment-kill statement in all backends" {
     var h = try ShaderHarness.init(src, std.testing.allocator);
     defer h.deinit();
     try h.expectGlsl("discard;");
+    try h.expectWgsl("discard");
     try h.expectHlsl("discard;");
     try h.expectMsl("discard_fragment();");
 }
@@ -569,6 +631,7 @@ test "anonymous _ params in non-entry helper functions are dropped from output" 
     defer h.deinit();
     // The generated helper must have exactly one parameter (x), not two.
     try h.expectGlsl("helper(float x)");
+    try h.expectWgsl("helper(x: f32)");
     try h.expectHlsl("helper(float x)");
     try h.expectMsl("helper(float x)");
 }

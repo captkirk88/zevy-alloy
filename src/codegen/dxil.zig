@@ -66,13 +66,19 @@ pub const DxilGenerator = struct {
         var dir = std.Io.Dir.openDirAbsolute(io, src_dir, .{}) catch return error.IoError;
         defer dir.close(io);
 
-        dir.writeFile(io, .{ .sub_path = "_zsl_tmp.hlsl", .data = hlsl_src }) catch return error.IoError;
-        defer dir.deleteFile(io, "_zsl_tmp.hlsl") catch {};
-        defer dir.deleteFile(io, "_zsl_tmp.dxil") catch {};
+        const module_stem = std.fs.path.stem(module.path);
+        const hlsl_tmp_name = std.fmt.allocPrint(alloc, "_zsl_tmp_{s}.hlsl", .{module_stem}) catch return error.OutOfMemory;
+        defer alloc.free(hlsl_tmp_name);
+        const dxil_tmp_name = std.fmt.allocPrint(alloc, "_zsl_tmp_{s}.dxil", .{module_stem}) catch return error.OutOfMemory;
+        defer alloc.free(dxil_tmp_name);
 
-        const hlsl_full = try std.fs.path.join(alloc, &.{ src_dir, "_zsl_tmp.hlsl" });
+        dir.writeFile(io, .{ .sub_path = hlsl_tmp_name, .data = hlsl_src }) catch return error.IoError;
+        defer dir.deleteFile(io, hlsl_tmp_name) catch {};
+        defer dir.deleteFile(io, dxil_tmp_name) catch {};
+
+        const hlsl_full = try std.fs.path.join(alloc, &.{ src_dir, hlsl_tmp_name });
         defer alloc.free(hlsl_full);
-        const dxil_full = try std.fs.path.join(alloc, &.{ src_dir, "_zsl_tmp.dxil" });
+        const dxil_full = try std.fs.path.join(alloc, &.{ src_dir, dxil_tmp_name });
         defer alloc.free(dxil_full);
 
         // 4. Invoke dxc.
@@ -99,7 +105,7 @@ pub const DxilGenerator = struct {
         }
 
         // 5. Stream .dxil to writer.
-        const dxil_data = dir.readFileAlloc(io, "_zsl_tmp.dxil", alloc, .limited(16 * 1024 * 1024)) catch return error.IoError;
+        const dxil_data = dir.readFileAlloc(io, dxil_tmp_name, alloc, .limited(16 * 1024 * 1024)) catch return error.IoError;
         defer alloc.free(dxil_data);
         writer.writeAll(dxil_data) catch return error.IoError;
     }

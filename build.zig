@@ -45,7 +45,7 @@ pub fn compileShaders(
     compiler: *std.Build.Step.Compile,
     jobs: []const ShaderJob,
 ) *std.Build.Step {
-    const shaders_step = b.step("shaders", "Compile .zsl shaders");
+    const shaders_step = b.step("shaders-compile", "Compile .zsl shaders");
     const zsl_module = b.modules.get("zsl") orelse @panic("zsl module not found");
     for (jobs) |job| {
         // Register the .zsl file as a named module so ZLS can discover it
@@ -134,7 +134,7 @@ pub fn build(b: *std.Build) !void {
 
     // -- Shaders -----------------------------------------------------------------
 
-    const shaders_step = compileShaders(b, exe, &.{
+    const compiled_shaders_step = compileShaders(b, exe, &.{
         .{
             .zsl = "examples/circle_color.zsl",
             .outputs = &.{
@@ -166,7 +166,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     // Make sure shaders are built before tests, so that generated shader files are present for test cases that need them.
-    test_step.dependOn(shaders_step);
+    test_step.dependOn(compiled_shaders_step);
 
     const zevy_ecs_dep = b.dependency("zevy_ecs", .{ .target = target, .optimize = optimize });
 
@@ -206,7 +206,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     const circles_run = b.addRunArtifact(circles_exe);
-    circles_run.step.dependOn(shaders_step);
+    circles_run.step.dependOn(compiled_shaders_step);
 
     const circles_step = b.step("circles", "Run the circles example");
     circles_step.dependOn(&circles_run.step);
@@ -225,9 +225,9 @@ pub fn build(b: *std.Build) !void {
         .root_module = factorial_mod,
     });
 
-    compute_factorial_exe.step.dependOn(shaders_step);
+    compute_factorial_exe.step.dependOn(compiled_shaders_step);
     const compute_factorial_run = b.addRunArtifact(compute_factorial_exe);
-    compute_factorial_run.step.dependOn(shaders_step);
+    compute_factorial_run.step.dependOn(compiled_shaders_step);
 
     const compute_factorial_step = b.step("factorial", "Run the compute factorial example");
     compute_factorial_step.dependOn(&compute_factorial_run.step);
@@ -237,4 +237,17 @@ pub fn build(b: *std.Build) !void {
     examples_step.dependOn(compute_factorial_step);
 
     try buildtools.fetch.addFetchStep(b, b.path("build.zig.zon"));
+
+    const shaders_step = b.step("shaders", "Compile .zsl shaders and validate generated WGSL");
+    const wgsl_check_step = addCheckWgslToolStep(b, compiled_shaders_step);
+    shaders_step.dependOn(wgsl_check_step);
+}
+
+fn addCheckWgslToolStep(b: *std.Build, before: ?*std.Build.Step) *std.Build.Step {
+    const step = b.step("check", "Check that wgsl-tool can parse the generated WGSL shaders");
+    const check_cmd = b.addSystemCommand(&[_][]const u8{ "cargo", "run", "--manifest-path", "wgsl-test/Cargo.toml" });
+    check_cmd.has_side_effects = true;
+    if (before != null) check_cmd.step.dependOn(before.?);
+    step.dependOn(&check_cmd.step);
+    return step;
 }
