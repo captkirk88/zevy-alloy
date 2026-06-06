@@ -93,6 +93,7 @@ pub fn UniformBuffer(comptime _: type, comptime _: BindingOpts) type {
     return struct {};
 }
 
+/// Storage buffer is a read-write buffer resource used in compute shaders.
 pub fn StorageBuffer(comptime _: type, comptime _: BindingOpts) type {
     return struct {};
 }

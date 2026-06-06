@@ -30,10 +30,10 @@ pub const ShaderStage = enum {
 
     pub fn glslKeyword(self: ShaderStage) []const u8 {
         return switch (self) {
-            .vertex => "vertex",
-            .fragment => "fragment",
+            .vertex => "vert",
+            .fragment => "frag",
             .compute => "kernel",
-            .geometry => "geometry",
+            .geometry => "geom",
             .tessellation_control => "tess_control",
             .tessellation_eval => "tess_eval",
             .unknown => "unknown",
@@ -148,7 +148,7 @@ pub const BindingOpts = struct {
 pub const SemanticKind = enum {
     none,
     position, // SV_Position / gl_Position
-    
+
     target, // SV_Target(n)
     /// SV_TexCoord(n) / gl_MultiViewVar(n) / user-defined in GLSL
     tex_coord,

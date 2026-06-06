@@ -28,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
     // Use a 1×1 hidden window — no output is rendered.
     rl.setConfigFlags(.{ .window_hidden = true });
     rl.initWindow(1, 1, "");
+    errdefer rl.closeWindow();
     defer rl.closeWindow();
 
     // Compile the compute shader (ZSL-generated GLSL 4.50).

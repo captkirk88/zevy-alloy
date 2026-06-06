@@ -197,7 +197,7 @@ const Parser = struct {
 
             if (isStdlibZslImportPath(import_path)) {
                 try self.imports.put(var_name, .{ .stdlib = {} });
-            } else if (std.mem.endsWith(u8, import_path, ".zsl")) {
+            } else if (std.mem.endsWith(u8, import_path, ".zsl") or std.mem.endsWith(u8, import_path, ".zsl.zig")) {
                 if (!self.allow_user_imports) {
                     self.errors.addError(
                         self.file_path,

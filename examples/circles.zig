@@ -14,7 +14,6 @@ const InputPlugin = zevy_raylib.InputPlugin;
 const UIPlugin = zevy_raylib.UIPlugin;
 const ShaderComponent = zevy_raylib.graphics.shader.ShaderComponent;
 const ShaderBatcher = zevy_raylib.graphics.shader.ShaderBatcher;
-const cleanupShaderSystem = zevy_raylib.graphics.shader.cleanupShaderSystem;
 const Assets = zevy_raylib.Assets;
 const ShaderLoader = zevy_raylib.ShaderLoader;
 
@@ -41,7 +40,7 @@ const Circle = struct {
     color: rl.Color,
 };
 
-fn movementSystem(
+fn movement_System(
     commands: zevy_ecs.params.Commands,
     query: zevy_ecs.params.Query(struct { pos: Position, vel: Velocity }),
     dt_res: zevy_ecs.params.Res(DeltaTime),
@@ -73,15 +72,12 @@ fn updateCircleShaderUniformsSystem(
     const time_value: f32 = @as(f32, @floatFromInt(quantized_tick)) / 60.0;
     while (query.next()) |item| {
         const sc: *ShaderComponent = item.shader;
-        sc.setUniform("time", .{ .float = time_value }) catch |err| {
-            std.log.warn("Skipping shader uniform update: {s}", .{@errorName(err)});
-            continue;
-        };
+        try sc.setUniform("time", .{ .float = time_value });
         break;
     }
 }
 
-fn shaderTickSystem(
+fn shaderTick_System(
     _: zevy_ecs.params.Commands,
     tick_res: zevy_ecs.params.ResMut(ShaderTick),
 ) void {
@@ -108,20 +104,12 @@ fn circleStartupSystem(
     commands: zevy_ecs.params.Commands,
     assets_res: zevy_ecs.params.ResMut(Assets),
 ) !void {
+    const log = std.log.scoped(.circles_example);
     const assets = assets_res.get();
-    var shader_handle: ?zevy_raylib.AssetHandle = null;
-    const shader_ptr = assets.loadAssetNow(rl.Shader, CIRCLE_SHADER_PATH, ShaderLoader.LoadSettings.frag) catch |err| blk: {
-        std.log.warn("Failed to load circle shader '{s}': {s}. Falling back to default shader.", .{ CIRCLE_SHADER_PATH, @errorName(err) });
-        break :blk null;
+    const shader_handle: zevy_raylib.AssetHandle = assets.loadAsset(rl.Shader, CIRCLE_SHADER_PATH, ShaderLoader.LoadSettings.frag) catch |err| {
+        log.err("Failed to load shader: {s}", .{@errorName(err)});
+        return err;
     };
-
-    if (shader_ptr) |shader| {
-        if (shader.id == 0) {
-            std.log.warn("Circle shader '{s}' compiled to invalid shader id=0; falling back to default shader.", .{CIRCLE_SHADER_PATH});
-        } else {
-            shader_handle = try assets.loadAsset(rl.Shader, CIRCLE_SHADER_PATH, ShaderLoader.LoadSettings.frag);
-        }
-    }
 
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
@@ -142,18 +130,52 @@ fn circleStartupSystem(
             .radius = 10 + random.float(f32) * 20,
             .color = rl.Color.init(random.intRangeAtMost(u8, 0, 255), random.intRangeAtMost(u8, 0, 255), hue_byte, 255),
         });
-        if (shader_handle) |handle| {
-            _ = ent.add(ShaderComponent, ShaderComponent.initResolved(commands.allocator(), handle));
-        }
+        _ = ent.add(ShaderComponent, ShaderComponent.initResolved(commands.allocator(), shader_handle));
     }
+}
+
+fn renderDebugText_System(fixed_dt_res: zevy_ecs.params.Res(zevy_raylib.timing.FixedTimestepAccumulator)) !void {
+    const fixed_dt = fixed_dt_res.get();
+    const diagnostics = fixed_dt.diagnostics;
+
+    // Display FPS
+    rl.drawFPS(10, 10);
+    // draw tps
+    var tps_buf: [32]u8 = undefined;
+    const tps_text = std.fmt.bufPrintZ(&tps_buf, "TPS: {d}", .{zevy_raylib.getTPS(fixed_dt)}) catch "TPS: ?";
+    rl.drawText(
+        tps_text,
+        10,
+        rl.getScreenHeight() - 30,
+        16,
+        rl.Color.yellow,
+    );
+
+    var fixed_buf: [128]u8 = undefined;
+    const dropped_ms: i32 = @intFromFloat(if (diagnostics) |diag| diag.dropped_time else 1 * 1000.0);
+    const fixed_text = std.fmt.bufPrintZ(
+        &fixed_buf,
+        "Fixed: {d} steps dropped: {d}ms overloaded: {any}",
+        .{ if (diagnostics) |diag| diag.updates else 0, dropped_ms, if (diagnostics) |diag| diag.overloaded else null },
+    ) catch "Fixed: ?";
+    const overloaded = diagnostics != null and diagnostics.?.overloaded;
+    rl.drawText(
+        fixed_text,
+        10,
+        rl.getScreenHeight() - 50,
+        16,
+        if (overloaded) rl.Color.orange else rl.Color.green,
+    );
+
+    rl.drawText("Press ESC to exit", 10, 40, 20, rl.Color.dark_gray);
+
+    var buf: [128]u8 = undefined;
+    const entity_count = try std.fmt.bufPrintZ(&buf, "Total Entities: {d}", .{CIRCLE_COUNT});
+    rl.drawText(entity_count, 10, 100, 16, rl.Color.white);
 }
 
 pub fn main(init: std.process.Init) !u8 {
     var circles = app.new(init);
-    defer {
-        if (rl.isAudioDeviceReady()) rl.closeAudioDevice();
-        if (rl.isWindowReady()) rl.closeWindow();
-    }
     defer circles.deinit();
 
     const Stage = zevy_ecs.schedule.Stage;
@@ -173,11 +195,11 @@ pub fn main(init: std.process.Init) !u8 {
         .addResource(DeltaTime, fixed_dt)
         .addResource(ShaderTick, @as(ShaderTick, 0))
         .addSystem(Stage(Stages.Startup), circleStartupSystem)
-        .addSystem(Stage(Stages.FixedUpdate), shaderTickSystem)
-        .addSystem(Stage(Stages.FixedUpdate), movementSystem)
+        .addSystem(Stage(Stages.FixedUpdate), shaderTick_System)
+        .addSystem(Stage(Stages.FixedUpdate), movement_System)
         .addSystem(Stage(Stages.PreDraw), updateCircleShaderUniformsSystem)
         .addSystem(Stage(Stages.Draw), renderSystem)
-        .addSystem(Stage(Stages.Exit), cleanupShaderSystem)
+        .addSystem(Stage(Stages.PostDraw), renderDebugText_System)
         .run();
 
     std.log.info("Shutting down...", .{});

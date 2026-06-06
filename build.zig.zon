@@ -22,8 +22,8 @@
             .hash = "zevy_ecs-3.0.1-VoL9mZZnCgD4l5l11hQUG-19dLHAc-cfdQFpF9OZNpyG",
         },
         .zevy_raylib = .{
-            .url = "git+https://github.com/captkirk88/zevy-raylib#3670169d827196679a8df807508653d2afd838ad",
-            .hash = "zevy_raylib-0.2.7-6RwEif6AGgC0vz_aNeN4hv7P6tSBp-ACaZuz4M7xfUeh",
+            .url = "git+https://github.com/captkirk88/zevy-raylib#f91d5b57e9963db590c98cd6788a6253637225bd",
+            .hash = "zevy_raylib-0.2.7-6RwEibSCGgB3LCyU68Suuuz4ACfsGXzBAtRBPD6I5poT",
         },
         .raylib_zig = .{
             .url = "git+https://github.com/raylib-zig/raylib-zig#97be2c7ae646a2f09856604b138c427c0af1b952",

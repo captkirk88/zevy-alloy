@@ -1,9 +1,8 @@
 const zsl = @import("../zsl.zig");
-const util = @import("util.zsl");
+const util = @import("util.zsl.zig"); // use .zsl.zig extension to let a zig lsp parse it as Zig code for better intellisense.
 
 pub const compute: zsl.ComputeOpts = .{ .local_size_x = 64, .local_size_y = 1, .local_size_z = 1 };
 
-/// results[n] = n! for 0 ≤ n ≤ 12  (12! = 479001600, fits in u32).
 pub var results: zsl.StorageBuffer(u32, .{}) = undefined;
 
 pub fn main(_: zsl.Stage.compute) void {
