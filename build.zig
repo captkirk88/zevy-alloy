@@ -195,6 +195,7 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "zevy_ecs", .module = zevy_ecs_mod },
             .{ .name = "zevy_raylib", .module = zevy_raylib_mod },
+            .{ .name = "alloy", .module = mod },
             // .{ .name = "raylib", .module = raylib_dep.module("raylib") },
         },
     });

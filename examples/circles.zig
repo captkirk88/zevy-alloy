@@ -7,6 +7,7 @@ const zevy_ecs = @import("zevy_ecs");
 const app = zevy_ecs.app;
 const zevy_raylib = @import("zevy_raylib");
 const rl = zevy_raylib.rl;
+const alloy = @import("alloy");
 
 const RaylibPlugin = zevy_raylib.RaylibPlugin;
 const AssetsPlugin = zevy_raylib.AssetsPlugin;
@@ -19,7 +20,7 @@ const ShaderLoader = zevy_raylib.ShaderLoader;
 
 const builtin = @import("builtin");
 const CIRCLE_COUNT = 10_000;
-const CIRCLE_SHADER_PATH = if (builtin.target.abi.isAndroid()) "examples/circle_color.es.frag.glsl" else "examples/circle_color.330.frag.glsl";
+const CIRCLE_SHADER_PATH = "examples/circle_color.zsl";
 const COLOR_STEP_TICKS: u32 = 2;
 
 const DeltaTime = f32;
@@ -39,6 +40,26 @@ const Circle = struct {
     radius: f32,
     color: rl.Color,
 };
+
+fn compileShaderForPlatform(io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
+    var glsl_gen = alloy.GlslGenerator{ .version = if (builtin.abi.isAndroid()) .es300 else .glsl450 };
+    const file = try std.Io.Dir.cwd().openFile(io, CIRCLE_SHADER_PATH, .{});
+    var buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &buf);
+    var generators = [_]alloy.Generator{glsl_gen.generator()};
+    var result = try alloy.compileInMemory(io, allocator, &reader.interface, &generators, .{});
+    defer result.deinit();
+    if (result.hasErrors()) {
+        var err_buf: [1024]u8 = undefined;
+        var writer = std.Io.File.stderr().writer(io, &err_buf);
+        try result.printDiagnostics(&writer.interface);
+        return error.ShaderCompileFailed;
+    }
+    const shader_source = result.outputs[0].content orelse return error.ShaderCompileFailed;
+    const shader_path = "examples/circle_color.runtime.frag.glsl";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = shader_path, .data = shader_source });
+    return shader_path;
+}
 
 fn movement_System(
     commands: zevy_ecs.params.Commands,
@@ -105,8 +126,9 @@ fn circleStartupSystem(
     assets_res: zevy_ecs.params.ResMut(Assets),
 ) !void {
     const log = std.log.scoped(.circles_example);
+    const shader_path = try compileShaderForPlatform(commands.io(), commands.allocator());
     const assets = assets_res.get();
-    const shader_handle: zevy_raylib.AssetHandle = assets.loadAsset(rl.Shader, CIRCLE_SHADER_PATH, ShaderLoader.LoadSettings.frag) catch |err| {
+    const shader_handle: zevy_raylib.AssetHandle = assets.loadAsset(rl.Shader, shader_path, ShaderLoader.LoadSettings.frag) catch |err| {
         log.err("Failed to load shader: {s}", .{@errorName(err)});
         return err;
     };
