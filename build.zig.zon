@@ -2,7 +2,7 @@
     .name = .zevy_alloy,
     // This is a [Semantic Version](https://semver.org/).
     // In a future version of Zig it will be used for package deduplication.
-    .version = "0.3.0",
+    .version = "0.3.1",
     // When forking a Zig project, this id should be regenerated (delete the
     // field and run zig build) if the upstream project is still maintained.
     // Otherwise, the fork is *hostile*, attempting to take control over the
@@ -18,12 +18,12 @@
             .hash = "zevy_buildtools-1.3.2-AG3r_IMOAQBvTaraIbje0VPv3I9jWxz67Cqoq4cr_Z_C",
         },
         .zevy_ecs = .{
-            .url = "git+https://github.com/captkirk88/zevy-ecs#76b574dca9cbd40b4f7fa154f73e4faa6fa37a9c",
-            .hash = "zevy_ecs-3.0.2-VoL9mdhnCgBIqosrJNMPUzWsJv_6Jh9g5TdjH_RasQgi",
+            .url = "git+https://github.com/captkirk88/zevy-ecs#19d0b9b81802d8ad8ef7b9118b7dec95df731cd9",
+            .hash = "zevy_ecs-3.0.3-VoL9mSNoCgD-7MLfzMaOqYl2p9HMRVpHC2-ej84joBU6",
         },
         .zevy_raylib = .{
-            .url = "git+https://github.com/captkirk88/zevy-raylib#7a158cdb1abd889fc627a817aa8a13936ea2ec2b",
-            .hash = "zevy_raylib-0.2.8-6RwEiYx1GgDE_os9hIuO5mw_Zg_3Cf0YDKhFu_Ku0n5B",
+            .url = "git+https://github.com/captkirk88/zevy-raylib#3dd60289d9bba2e1f8a31db4b1607316f869054d",
+            .hash = "zevy_raylib-0.2.9-6RwEiZyLGgBJoKJauKPiMd377IAo5VHf4FkUAwnbM3uZ",
         },
         .raylib_zig = .{
             .url = "git+https://github.com/raylib-zig/raylib-zig#97be2c7ae646a2f09856604b138c427c0af1b952",

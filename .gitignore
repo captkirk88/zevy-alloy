@@ -14,4 +14,5 @@ test_data/
 *.wgsl
 *.wesl
 
-wgsl-test/
+wgsl-test/target
+wgsl-test/*.lock
