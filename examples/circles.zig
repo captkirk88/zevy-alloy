@@ -196,6 +196,32 @@ fn renderDebugText_System(fixed_dt_res: zevy_ecs.params.Res(zevy_raylib.timing.F
     rl.drawText(entity_count, 10, 100, 16, rl.Color.white);
 }
 
+fn convergeAroundMouse(
+    query: zevy_ecs.params.Query(struct {
+        entity: zevy_ecs.Entity,
+        pos: Position,
+        vel: Velocity,
+    }),
+    input_man: zevy_ecs.params.Res(zevy_raylib.input.InputManager),
+) !void {
+    const speed = 0.4;
+    const mouse_pos = rl.getMousePosition();
+    if (input_man.get().getCurrentState().isPressed(.{ .mouse = .left })) {
+        while (query.next()) |item| {
+            const pos: *Position = item.pos;
+            const vel: *Velocity = item.vel;
+
+            const direction = rl.Vector2{
+                .x = mouse_pos.x - pos.x,
+                .y = mouse_pos.y - pos.y,
+            };
+
+            vel.x = direction.x * speed;
+            vel.y = direction.y * speed;
+        }
+    }
+}
+
 pub fn main(init: std.process.Init) !u8 {
     var circles = app.new(init);
     defer circles.deinit();
@@ -222,6 +248,7 @@ pub fn main(init: std.process.Init) !u8 {
         .addSystem(Stage(Stages.PreDraw), updateCircleShaderUniformsSystem)
         .addSystem(Stage(Stages.Draw), renderSystem)
         .addSystem(Stage(Stages.PostDraw), renderDebugText_System)
+        .addSystem(Stage(Stages.Update), convergeAroundMouse)
         .run();
 
     std.log.info("Shutting down...", .{});
