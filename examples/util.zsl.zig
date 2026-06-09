@@ -1,3 +1,7 @@
+//! Utility functions for examples.
+//!
+//! .zsl.zig extension allows zig lsp to parse it as Zig code for better intellisense, even in .zsl files.
+
 const zsl = @import("../zsl.zig");
 
 /// Maximum N for which factorial fits in u32. (12! = 479001600)
