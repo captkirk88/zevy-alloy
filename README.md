@@ -1,3 +1,6 @@
+> [!NOTE]
+> Archived, see [zevy-ecs](https://www.github.com/captkirk88/zevy-ecs) README for details.
+
 # zevy-alloy
 
 > Experimental: zevy-alloy is early-stage and may change in breaking ways.
